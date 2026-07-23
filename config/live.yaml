@@ -1,0 +1,25 @@
+# Production / real-money config.
+# This file alone does NOT enable live trading. All of the following must also hold:
+#   - LIVE=true in the runtime environment
+#   - broker.live: true (set below)
+#   - per-strategy live: true (set in each strategy block)
+# Even with all of the above, the risk gate may still refuse trades.
+
+env: live
+
+logging:
+  level: INFO
+  format: json
+
+broker:
+  name: alpaca
+  live: true
+  base_url: https://api.alpaca.markets
+
+risk:
+  # Tighter caps in production than in dev.
+  max_per_trade_risk_pct: "0.003"
+  max_daily_loss_pct: "0.02"
+  max_consecutive_losses: 3
+
+strategies: []

@@ -1,0 +1,571 @@
+// =============================================================================
+//  algotrader — Multi-Strategy Ensemble STRATEGY (Pine Script v6)
+//
+//  Backtesting-ready port of the Python algotrader's full decision + execution
+//  loop. Whereas algotrader.pine plots signals on a chart, this version places
+//  orders through TradingView's built-in strategy engine so you can review
+//  trades, equity curve, drawdown, and KPIs natively.
+//
+//  Order discipline matches the Python bot:
+//    - Ensemble confirmation (optional) before any entry
+//    - Fixed-fractional position sizing on a configurable risk%
+//    - ATR-based stop-loss + R-multiple target
+//    - Optional reverse-on-opposite-signal
+//    - Date-range + session filters for clean backtesting windows
+//    - Pyramiding capped at 1 (one position at a time) by default — production
+//      bot does the same, modulo per-strategy allocation limits
+//
+//  How to use: TradingView → Pine Editor → New strategy → paste → Save → Add.
+//  Then open the Strategy Tester tab below the chart for KPI / equity curve.
+// =============================================================================
+
+//@version=6
+strategy(
+     title                    = "algotrader — Strategy (v6)",
+     shorttitle               = "algotrader-strat",
+     overlay                  = true,
+     initial_capital          = 100000,
+     default_qty_type         = strategy.cash,
+     default_qty_value        = 10000,
+     currency                 = currency.USD,
+     commission_type          = strategy.commission.percent,
+     commission_value         = 0.05,        // 5 bps round-trip-ish
+     slippage                 = 1,           // in ticks
+     pyramiding               = 0,           // 0 → one position at a time
+     process_orders_on_close  = true,
+     calc_on_every_tick       = false,
+     max_labels_count         = 500,
+     max_lines_count          = 500,
+     max_boxes_count          = 500,
+     max_bars_back            = 2000)
+
+
+// =============================================================================
+//  INPUTS
+// =============================================================================
+
+// ---- Backtest window --------------------------------------------------------
+g_window      = "Backtest window"
+useDateRange  = input.bool(false,                       "Limit to date range",  group = g_window)
+fromDate      = input.time(timestamp("2021-01-01"),     "From",                  group = g_window)
+toDate        = input.time(timestamp("2099-12-31"),     "To",                    group = g_window)
+sessionFilter = input.session("0930-1600",              "Session (entries only)", group = g_window,
+                  tooltip = "Entries are gated to this session window. Exits via stop/target still fire any time.")
+useSession    = input.bool(false,                       "Restrict entries to session", group = g_window)
+
+// ---- Execution / risk -------------------------------------------------------
+g_exec        = "Execution"
+riskPctTrade  = input.float(0.5,    "Risk per trade (%)",   minval = 0.05, maxval = 5, step = 0.05, group = g_exec) / 100.0
+maxPositionPct= input.float(20.0,   "Max position (% equity)", minval = 1, maxval = 100, group = g_exec) / 100.0
+atrStopMult   = input.float(2.0,    "ATR stop multiplier",   minval = 0.5,  maxval = 10, step = 0.1, group = g_exec)
+rMultiple     = input.float(2.0,    "Target R multiple",     minval = 0.5,  maxval = 10, step = 0.1, group = g_exec)
+atrLength     = input.int(14,       "ATR length",            minval = 2,                              group = g_exec)
+useStops      = input.bool(true,    "Use ATR stop-loss",                                              group = g_exec)
+useTargets    = input.bool(true,    "Use R-multiple take-profit",                                     group = g_exec)
+exitOnOpp     = input.bool(true,    "Exit on opposite ensemble signal",                               group = g_exec,
+                  tooltip = "If true, an active long flips flat on an ensemble short (and vice versa). When false, only stops/targets close trades.")
+allowShorts   = input.bool(true,    "Allow short entries",                                            group = g_exec)
+allowLongs    = input.bool(true,    "Allow long entries",                                             group = g_exec)
+
+// ---- Ensemble ---------------------------------------------------------------
+g_ens         = "Ensemble"
+useEnsemble   = input.bool(false,   "Require ensemble confirmation",         group = g_ens,
+                  tooltip = "OFF (default): any single strategy firing places a trade. ON: require ≥ N strategies to agree on the same bar (very strict — most charts produce few or zero such bars).")
+minVotes      = input.int(1,        "Minimum agreeing strategies",            minval = 1, maxval = 6, group = g_ens,
+                  tooltip = "With ensemble ON: raise this above 1 only if the chart produces frequent overlapping signals. Inspect the dashboard's L/S vote counts to confirm.")
+
+// ---- Display ----------------------------------------------------------------
+g_disp        = "Display"
+showDash      = input.bool(true,    "Show dashboard",                  group = g_disp)
+showOverlays  = input.bool(true,    "Plot MA / BB overlays",           group = g_disp)
+showStrategyMarkers = input.bool(true, "Show per-strategy signal dots", group = g_disp,
+                  tooltip = "Small colored dots above/below bars show WHICH individual strategy fires — useful for debugging when no trades are happening.")
+dashPosition  = input.string("top_right", "Dashboard position",
+                  options = ["top_right", "top_left", "bottom_right", "bottom_left", "middle_right", "middle_left"],
+                  group = g_disp)
+
+// ---- Strategy: SMA Crossover -----------------------------------------------
+g_sma         = "Strategy: SMA Crossover"
+enSMA         = input.bool(true, "Enable",   group = g_sma)
+smaFastLen    = input.int(20,    "Fast SMA", minval = 2, group = g_sma)
+smaSlowLen    = input.int(50,    "Slow SMA", minval = 3, group = g_sma)
+
+// ---- Strategy: RSI Mean Reversion ------------------------------------------
+g_rsi         = "Strategy: RSI Mean Reversion"
+enRSI         = input.bool(true, "Enable",                       group = g_rsi)
+rsiLen        = input.int(14,    "RSI length",       minval = 2, group = g_rsi)
+rsiOS         = input.float(30,  "Oversold",  minval = 5,  maxval = 50, group = g_rsi)
+rsiOB         = input.float(70,  "Overbought",minval = 50, maxval = 95, group = g_rsi)
+rsiTrendLen   = input.int(200,   "Trend SMA",        minval = 10, group = g_rsi,
+                  tooltip = "Longs require close > trend SMA. Shorts require close < trend SMA.")
+rsiAllowShort = input.bool(false,"Allow shorts (this strategy)", group = g_rsi)
+
+// ---- Strategy: Bollinger Squeeze -------------------------------------------
+g_bb          = "Strategy: Bollinger Squeeze"
+enBB          = input.bool(true, "Enable",          group = g_bb)
+bbLen         = input.int(20,    "BB length",         minval = 5,   group = g_bb)
+bbK           = input.float(2.0, "BB std-dev",        minval = 0.5, group = g_bb)
+keltLen       = input.int(20,    "Keltner length",    minval = 5,   group = g_bb)
+keltK         = input.float(1.5, "Keltner ATR mult",  minval = 0.5, group = g_bb)
+
+// ---- Strategy: TD Sequential -----------------------------------------------
+g_td          = "Strategy: TD Sequential"
+enTD          = input.bool(true, "Enable",          group = g_td)
+tdThresh      = input.int(9,     "Setup threshold", minval = 4, group = g_td)
+
+// ---- Strategy: VCP breakout ------------------------------------------------
+g_vcp         = "Strategy: VCP Breakout"
+enVCP         = input.bool(true, "Enable",                            group = g_vcp)
+vcpPivotLen   = input.int(20,    "Pivot lookback",       minval = 5,  group = g_vcp)
+vcpVolMult    = input.float(1.5, "Volume breakout mult", minval = 1.0, step = 0.1, group = g_vcp)
+
+// ---- Strategy: Fair-Value Gap (FVG) ----------------------------------------
+g_fvg         = "Strategy: FVG Fill"
+enFVG         = input.bool(true, "Enable",                  group = g_fvg)
+fvgMaxAge     = input.int(50,    "Max FVG age (bars)", minval = 5, group = g_fvg)
+
+
+// =============================================================================
+//  INDICATORS
+// =============================================================================
+
+atrVal        = ta.atr(atrLength)
+
+smaFast       = ta.sma(close, smaFastLen)
+smaSlow       = ta.sma(close, smaSlowLen)
+trendSMA      = ta.sma(close, rsiTrendLen)
+
+rsiVal        = ta.rsi(close, rsiLen)
+
+bbBasis       = ta.sma(close, bbLen)
+bbDev         = bbK * ta.stdev(close, bbLen)
+bbUpper       = bbBasis + bbDev
+bbLower       = bbBasis - bbDev
+
+keltBasis     = ta.ema(close, keltLen)
+keltATR       = ta.atr(keltLen)
+keltUpper     = keltBasis + keltK * keltATR
+keltLower     = keltBasis - keltK * keltATR
+
+isSqueezed    = bbUpper < keltUpper and bbLower > keltLower
+
+// TD Sequential setup counts
+var int tdBuy  = 0
+var int tdSell = 0
+if not na(close[4])
+    if close < close[4]
+        tdBuy  := math.min(tdBuy + 1, tdThresh)
+        tdSell := 0
+    else if close > close[4]
+        tdSell := math.min(tdSell + 1, tdThresh)
+        tdBuy  := 0
+    else
+        tdBuy  := 0
+        tdSell := 0
+
+priorPivotHigh = ta.highest(high, vcpPivotLen)[1]
+priorPivotLow  = ta.lowest(low,  vcpPivotLen)[1]
+avgVol         = ta.sma(volume, 20)
+vcpBreakout    = enVCP and not na(priorPivotHigh) and close > priorPivotHigh and volume > avgVol * vcpVolMult
+
+
+// =============================================================================
+//  FVG TRACKING
+// =============================================================================
+
+type FVG
+    float top
+    float bottom
+    bool  isBull
+    int   bornBar
+
+var array<FVG> activeFVGs = array.new<FVG>()
+
+if barstate.isconfirmed and not na(high[2]) and not na(low[2])
+    if high[2] < low
+        g_ = FVG.new(top = low, bottom = high[2], isBull = true, bornBar = bar_index)
+        array.push(activeFVGs, g_)
+    if low[2] > high
+        g_ = FVG.new(top = low[2], bottom = high, isBull = false, bornBar = bar_index)
+        array.push(activeFVGs, g_)
+
+if array.size(activeFVGs) > 0
+    pruned = array.new<FVG>()
+    for i = 0 to array.size(activeFVGs) - 1
+        g_ = array.get(activeFVGs, i)
+        age      = bar_index - g_.bornBar
+        consumed = (g_.isBull and low <= g_.bottom) or (not g_.isBull and high >= g_.top)
+        if age <= fvgMaxAge and not consumed
+            array.push(pruned, g_)
+    activeFVGs := pruned
+
+fvgLongHit  = false
+fvgShortHit = false
+if enFVG and array.size(activeFVGs) > 0
+    for i = 0 to array.size(activeFVGs) - 1
+        g_ = array.get(activeFVGs, i)
+        if g_.isBull and low <= g_.top and low >= g_.bottom
+            fvgLongHit := true
+        if not g_.isBull and high >= g_.bottom and high <= g_.top
+            fvgShortHit := true
+
+
+// =============================================================================
+//  STRATEGY SIGNALS
+// =============================================================================
+
+smaLong  = enSMA and ta.crossover(smaFast, smaSlow)
+smaShort = enSMA and ta.crossunder(smaFast, smaSlow)
+smaSig   = smaLong ? 1 : smaShort ? -1 : 0
+
+rsiLong  = enRSI and rsiVal < rsiOS and close > trendSMA
+rsiShort = enRSI and rsiAllowShort and rsiVal > rsiOB and close < trendSMA
+rsiSig   = rsiLong ? 1 : rsiShort ? -1 : 0
+
+var bool prevSqueezed = false
+bbLong  = enBB and prevSqueezed and not isSqueezed and close > bbBasis
+bbShort = enBB and prevSqueezed and not isSqueezed and close < bbBasis
+prevSqueezed := isSqueezed
+bbSig   = bbLong ? 1 : bbShort ? -1 : 0
+
+tdLong  = enTD and tdBuy  == tdThresh
+tdShort = enTD and tdSell == tdThresh
+tdSig   = tdLong ? 1 : tdShort ? -1 : 0
+
+vcpSig  = vcpBreakout ? 1 : 0
+
+fvgSig  = fvgLongHit ? 1 : fvgShortHit ? -1 : 0
+
+
+// =============================================================================
+//  ENSEMBLE
+// =============================================================================
+
+longVotes  = (smaSig  > 0 ? 1 : 0) + (rsiSig  > 0 ? 1 : 0) + (bbSig  > 0 ? 1 : 0) +
+             (tdSig   > 0 ? 1 : 0) + (vcpSig  > 0 ? 1 : 0) + (fvgSig > 0 ? 1 : 0)
+shortVotes = (smaSig  < 0 ? 1 : 0) + (rsiSig  < 0 ? 1 : 0) + (bbSig  < 0 ? 1 : 0) +
+             (tdSig   < 0 ? 1 : 0) + (vcpSig  < 0 ? 1 : 0) + (fvgSig < 0 ? 1 : 0)
+
+ensembleLong  = useEnsemble and longVotes  >= minVotes and shortVotes < minVotes
+ensembleShort = useEnsemble and shortVotes >= minVotes and longVotes  < minVotes
+
+goLong  = useEnsemble ? ensembleLong  : (smaLong  or rsiLong  or bbLong  or tdLong  or vcpBreakout or fvgLongHit)
+goShort = useEnsemble ? ensembleShort : (smaShort or rsiShort or bbShort or tdShort or fvgShortHit)
+
+
+// =============================================================================
+//  RISK / SIZING
+//
+//  qty = (equity * risk%) / (atrStopMult * ATR)
+//  Floor at 1 share for stock; clamp at max_position% of equity.
+// =============================================================================
+
+equityNow    = strategy.equity
+riskAmount   = equityNow * riskPctTrade
+riskPerUnit  = atrStopMult * atrVal
+sizeRisk     = riskPerUnit > 0 ? riskAmount / riskPerUnit : 0
+maxSize      = close > 0 ? (equityNow * maxPositionPct) / close : 0
+qtyOrder     = math.min(sizeRisk, maxSize)
+qtyOrder     := math.max(qtyOrder, 0.0)
+
+longStop     = close - riskPerUnit
+shortStop    = close + riskPerUnit
+longTarget   = close + rMultiple * riskPerUnit
+shortTarget  = close - rMultiple * riskPerUnit
+
+
+// =============================================================================
+//  ENTRY / EXIT GATES
+// =============================================================================
+
+// Backtest window
+inDateWindow = not useDateRange or (time >= fromDate and time <= toDate)
+
+// Session gate (entries only)
+inSession    = not useSession or not na(time(timeframe.period, sessionFilter))
+
+canEnterLong   = allowLongs  and inDateWindow and inSession and qtyOrder > 0 and strategy.position_size <= 0
+canEnterShort  = allowShorts and inDateWindow and inSession and qtyOrder > 0 and strategy.position_size >= 0
+
+// Close-out at the end of the backtest window so we don't carry untracked positions.
+if useDateRange and time > toDate and strategy.position_size != 0
+    strategy.close_all(comment = "backtest window end")
+
+
+// =============================================================================
+//  ENTRIES
+// =============================================================================
+
+if goLong and canEnterLong
+    // If we're flat → enter long. If we're short and exitOnOpp → flip.
+    if strategy.position_size < 0 and exitOnOpp
+        strategy.close("short", comment = "flip → long")
+    strategy.entry("long",
+         direction = strategy.long,
+         qty       = qtyOrder,
+         comment   = str.format("L  v={0}/{1}", longVotes, minVotes))
+
+if goShort and canEnterShort
+    if strategy.position_size > 0 and exitOnOpp
+        strategy.close("long", comment = "flip → short")
+    strategy.entry("short",
+         direction = strategy.short,
+         qty       = qtyOrder,
+         comment   = str.format("S  v={0}/{1}", shortVotes, minVotes))
+
+
+// =============================================================================
+//  EXITS (stop-loss + take-profit)
+//
+//  strategy.exit() ties the stop/target levels to the named entry. We compute
+//  them from THE FILL PRICE (strategy.position_avg_price), not from the
+//  current close, so the R-multiple is honest.
+// =============================================================================
+
+if strategy.position_size > 0 and (useStops or useTargets)
+    entryPx = strategy.position_avg_price
+    sl      = useStops    ? entryPx - atrStopMult * atrVal                     : na
+    tp      = useTargets  ? entryPx + rMultiple * atrStopMult * atrVal         : na
+    strategy.exit("long-exit", from_entry = "long",
+         stop  = sl,
+         limit = tp,
+         comment_loss   = "SL",
+         comment_profit = "TP")
+
+if strategy.position_size < 0 and (useStops or useTargets)
+    entryPx = strategy.position_avg_price
+    sl      = useStops    ? entryPx + atrStopMult * atrVal                     : na
+    tp      = useTargets  ? entryPx - rMultiple * atrStopMult * atrVal         : na
+    strategy.exit("short-exit", from_entry = "short",
+         stop  = sl,
+         limit = tp,
+         comment_loss   = "SL",
+         comment_profit = "TP")
+
+// Exit on opposite ensemble signal when no stop/target is the policy
+if exitOnOpp
+    if strategy.position_size > 0 and goShort
+        strategy.close("long", comment = "exit on opposite")
+    if strategy.position_size < 0 and goLong
+        strategy.close("short", comment = "exit on opposite")
+
+
+// =============================================================================
+//  PLOTS / OVERLAYS
+// =============================================================================
+
+plot(showOverlays ? smaFast  : na, "SMA fast",  color = color.new(color.blue,   0),  linewidth = 1)
+plot(showOverlays ? smaSlow  : na, "SMA slow",  color = color.new(color.orange, 0),  linewidth = 1)
+plot(showOverlays ? bbBasis  : na, "BB basis",  color = color.new(color.purple, 60), linewidth = 1)
+plot(showOverlays ? bbUpper  : na, "BB upper",  color = color.new(color.purple, 40), linewidth = 1)
+plot(showOverlays ? bbLower  : na, "BB lower",  color = color.new(color.purple, 40), linewidth = 1)
+
+bgcolor(isSqueezed ? color.new(color.aqua, 90) : na, title = "Squeeze background")
+
+// Per-strategy diagnostic dots — small markers above/below bars showing which
+// individual strategy fires. Critical for debugging "no trades happening": if
+// you see NO dots, the chart doesn't trigger ANY strategy and the issue is
+// chart / params. If you see dots but no triangles (entry markers), the
+// ensemble filter is blocking them — lower minVotes or turn ensemble off.
+plotchar(showStrategyMarkers and smaLong,    "sma L",  "·", location.belowbar, color.new(color.blue,    30), size = size.tiny)
+plotchar(showStrategyMarkers and smaShort,   "sma S",  "·", location.abovebar, color.new(color.blue,    30), size = size.tiny)
+plotchar(showStrategyMarkers and rsiLong,    "rsi L",  "·", location.belowbar, color.new(color.lime,    30), size = size.tiny)
+plotchar(showStrategyMarkers and rsiShort,   "rsi S",  "·", location.abovebar, color.new(color.lime,    30), size = size.tiny)
+plotchar(showStrategyMarkers and bbLong,     "bb  L",  "·", location.belowbar, color.new(color.purple,  30), size = size.tiny)
+plotchar(showStrategyMarkers and bbShort,    "bb  S",  "·", location.abovebar, color.new(color.purple,  30), size = size.tiny)
+plotchar(showStrategyMarkers and tdLong,     "td  L",  "·", location.belowbar, color.new(color.yellow,  30), size = size.tiny)
+plotchar(showStrategyMarkers and tdShort,    "td  S",  "·", location.abovebar, color.new(color.yellow,  30), size = size.tiny)
+plotchar(showStrategyMarkers and vcpBreakout,"vcp L",  "·", location.belowbar, color.new(color.fuchsia, 30), size = size.tiny)
+plotchar(showStrategyMarkers and fvgLongHit, "fvg L",  "·", location.belowbar, color.new(color.silver,  30), size = size.tiny)
+plotchar(showStrategyMarkers and fvgShortHit,"fvg S",  "·", location.abovebar, color.new(color.silver,  30), size = size.tiny)
+
+// Entry markers: big triangle when an entry actually fires (after ensemble + gates)
+plotshape(goLong and canEnterLong,
+     title    = "LONG entry",
+     style    = shape.triangleup,
+     location = location.belowbar,
+     color    = color.new(color.green, 0),
+     size     = size.normal,
+     text     = "L")
+plotshape(goShort and canEnterShort,
+     title    = "SHORT entry",
+     style    = shape.triangledown,
+     location = location.abovebar,
+     color    = color.new(color.red, 0),
+     size     = size.normal,
+     text     = "S")
+
+// Show the active stop / target as horizontal lines while a position is open.
+plot(strategy.position_size > 0 and useStops    ? strategy.position_avg_price - atrStopMult * atrVal             : na, "Long stop",   color = color.new(color.red, 0),   style = plot.style_linebr, linewidth = 2)
+plot(strategy.position_size > 0 and useTargets  ? strategy.position_avg_price + rMultiple * atrStopMult * atrVal : na, "Long target", color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 2)
+plot(strategy.position_size < 0 and useStops    ? strategy.position_avg_price + atrStopMult * atrVal             : na, "Short stop",  color = color.new(color.red, 0),   style = plot.style_linebr, linewidth = 2)
+plot(strategy.position_size < 0 and useTargets  ? strategy.position_avg_price - rMultiple * atrStopMult * atrVal : na, "Short target",color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 2)
+
+
+// =============================================================================
+//  DASHBOARD
+// =============================================================================
+
+dashPos() =>
+    switch dashPosition
+        "top_right"     => position.top_right
+        "top_left"      => position.top_left
+        "bottom_right"  => position.bottom_right
+        "bottom_left"   => position.bottom_left
+        "middle_right"  => position.middle_right
+        "middle_left"   => position.middle_left
+        =>                position.top_right
+
+pillColor(bool active, bool isLong) =>
+    active ? (isLong ? color.new(color.green, 0) : color.new(color.red, 0)) : color.new(color.gray, 70)
+
+pillText(int sig) =>
+    sig > 0 ? "LONG" : sig < 0 ? "SHORT" : "—"
+
+var table dash = table.new(dashPos(), 3, 22, border_width = 1, border_color = color.new(color.gray, 60))
+
+if showDash and barstate.islast
+    // Header
+    table.cell(dash, 0, 0, "algotrader-strat", bgcolor = color.new(color.blue, 0), text_color = color.white, text_size = size.normal)
+    table.cell(dash, 1, 0, syminfo.ticker,      bgcolor = color.new(color.blue, 0), text_color = color.white)
+    table.cell(dash, 2, 0, timeframe.period,    bgcolor = color.new(color.blue, 0), text_color = color.white)
+
+    // ---- Backtest performance section
+    table.cell(dash, 0, 1, "BACKTEST", bgcolor = color.new(color.gray, 30), text_color = color.white)
+    table.cell(dash, 1, 1, "VALUE",    bgcolor = color.new(color.gray, 30), text_color = color.white)
+    table.cell(dash, 2, 1, "%",        bgcolor = color.new(color.gray, 30), text_color = color.white)
+
+    netProfit = strategy.netprofit
+    pctReturn = strategy.initial_capital > 0 ? netProfit / strategy.initial_capital * 100 : 0
+    table.cell(dash, 0, 2, "Net P&L")
+    table.cell(dash, 1, 2, str.tostring(netProfit, "#,###.##"),
+                  text_color = netProfit >= 0 ? color.green : color.red)
+    table.cell(dash, 2, 2, str.tostring(pctReturn, "#.##") + "%",
+                  text_color = pctReturn >= 0 ? color.green : color.red)
+
+    nTrades = strategy.closedtrades
+    winsN   = strategy.wintrades
+    lossesN = strategy.losstrades
+    winRate = nTrades > 0 ? winsN / nTrades * 100 : 0
+    table.cell(dash, 0, 3, "Trades")
+    table.cell(dash, 1, 3, str.format("{0} W / {1} L", winsN, lossesN))
+    table.cell(dash, 2, 3, str.tostring(winRate, "#.#") + "% WR",
+                  text_color = winRate >= 50 ? color.green : color.red)
+
+    pf = strategy.grossprofit > 0 and strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : 0
+    table.cell(dash, 0, 4, "Profit factor")
+    table.cell(dash, 1, 4, str.tostring(pf, "#.##"))
+    table.cell(dash, 2, 4, pf >= 1.5 ? "good" : pf >= 1.0 ? "ok" : "bad",
+                  text_color = pf >= 1.5 ? color.green : pf >= 1.0 ? color.yellow : color.red)
+
+    table.cell(dash, 0, 5, "Max DD")
+    maxDD    = strategy.max_drawdown
+    maxDDPct = strategy.initial_capital > 0 ? maxDD / strategy.initial_capital * 100 : 0
+    table.cell(dash, 1, 5, str.tostring(maxDD, "#,###.##"))
+    table.cell(dash, 2, 5, "-" + str.tostring(maxDDPct, "#.##") + "%", text_color = color.red)
+
+    // ---- Open position
+    table.cell(dash, 0, 6, "POSITION", bgcolor = color.new(color.gray, 30), text_color = color.white)
+    table.cell(dash, 1, 6, "VALUE",    bgcolor = color.new(color.gray, 30), text_color = color.white)
+    table.cell(dash, 2, 6, "STATE",    bgcolor = color.new(color.gray, 30), text_color = color.white)
+
+    posSize  = strategy.position_size
+    posState = posSize > 0 ? "LONG" : posSize < 0 ? "SHORT" : "FLAT"
+    posCol   = posSize > 0 ? color.green : posSize < 0 ? color.red : color.gray
+    table.cell(dash, 0, 7, "Side")
+    table.cell(dash, 1, 7, str.tostring(math.abs(posSize), "#.##"))
+    table.cell(dash, 2, 7, posState, bgcolor = color.new(posCol, posSize != 0 ? 0 : 70), text_color = color.white)
+
+    table.cell(dash, 0, 8, "Avg entry")
+    table.cell(dash, 1, 8, posSize != 0 ? str.tostring(strategy.position_avg_price, "#.##") : "—")
+    upl = posSize != 0 ? (close - strategy.position_avg_price) * posSize : 0
+    table.cell(dash, 2, 8, posSize != 0 ? str.tostring(upl, "#.##") + " UPL" : "—",
+                  text_color = upl >= 0 ? color.green : color.red)
+
+    // ---- Indicator values
+    table.cell(dash, 0, 9,  "INDICATOR", bgcolor = color.new(color.gray, 30), text_color = color.white)
+    table.cell(dash, 1, 9,  "VALUE",     bgcolor = color.new(color.gray, 30), text_color = color.white)
+    table.cell(dash, 2, 9,  "STATE",     bgcolor = color.new(color.gray, 30), text_color = color.white)
+
+    table.cell(dash, 0, 10, str.format("RSI({0})", rsiLen))
+    table.cell(dash, 1, 10, str.tostring(rsiVal, "#.#"))
+    table.cell(dash, 2, 10, rsiVal < rsiOS ? "oversold" : rsiVal > rsiOB ? "overbought" : "neutral",
+                  text_color = rsiVal < rsiOS ? color.green : rsiVal > rsiOB ? color.red : color.gray)
+
+    table.cell(dash, 0, 11, "BB squeeze")
+    table.cell(dash, 1, 11, isSqueezed ? "compressed" : "released",
+                  text_color = isSqueezed ? color.aqua : color.gray)
+    pctB = (close - bbLower) / (bbUpper - bbLower) * 100
+    table.cell(dash, 2, 11, str.tostring(pctB, "#.#") + "% %B")
+
+    table.cell(dash, 0, 12, str.format("ATR({0})", atrLength))
+    table.cell(dash, 1, 12, str.tostring(atrVal, "#.##"))
+    table.cell(dash, 2, 12, str.tostring(atrVal / close * 100, "#.##") + "% vol")
+
+    table.cell(dash, 0, 13, "TD setup")
+    table.cell(dash, 1, 13, str.format("buy {0} / sell {1}", tdBuy, tdSell))
+    table.cell(dash, 2, 13, tdBuy >= tdThresh ? "BUY READY" : tdSell >= tdThresh ? "SELL READY" : "—",
+                  text_color = tdBuy >= tdThresh ? color.green : tdSell >= tdThresh ? color.red : color.gray)
+
+    // ---- Strategy votes
+    table.cell(dash, 0, 14, "STRATEGY",  bgcolor = color.new(color.gray, 30), text_color = color.white)
+    table.cell(dash, 1, 14, "SIGNAL",    bgcolor = color.new(color.gray, 30), text_color = color.white)
+    table.cell(dash, 2, 14, "ENABLED",   bgcolor = color.new(color.gray, 30), text_color = color.white)
+
+    table.cell(dash, 0, 15, "SMA cross")
+    table.cell(dash, 1, 15, pillText(smaSig), bgcolor = pillColor(smaSig != 0, smaSig > 0), text_color = color.white)
+    table.cell(dash, 2, 15, enSMA ? "yes" : "no", text_color = enSMA ? color.green : color.gray)
+
+    table.cell(dash, 0, 16, "RSI MR")
+    table.cell(dash, 1, 16, pillText(rsiSig), bgcolor = pillColor(rsiSig != 0, rsiSig > 0), text_color = color.white)
+    table.cell(dash, 2, 16, enRSI ? "yes" : "no", text_color = enRSI ? color.green : color.gray)
+
+    table.cell(dash, 0, 17, "BB squeeze")
+    table.cell(dash, 1, 17, pillText(bbSig),  bgcolor = pillColor(bbSig != 0, bbSig > 0),   text_color = color.white)
+    table.cell(dash, 2, 17, enBB ? "yes" : "no", text_color = enBB ? color.green : color.gray)
+
+    table.cell(dash, 0, 18, "TD Seq")
+    table.cell(dash, 1, 18, pillText(tdSig),  bgcolor = pillColor(tdSig != 0, tdSig > 0),   text_color = color.white)
+    table.cell(dash, 2, 18, enTD ? "yes" : "no", text_color = enTD ? color.green : color.gray)
+
+    table.cell(dash, 0, 19, "VCP breakout")
+    table.cell(dash, 1, 19, pillText(vcpSig), bgcolor = pillColor(vcpSig != 0, vcpSig > 0), text_color = color.white)
+    table.cell(dash, 2, 19, enVCP ? "yes" : "no", text_color = enVCP ? color.green : color.gray)
+
+    table.cell(dash, 0, 20, "FVG fill")
+    table.cell(dash, 1, 20, pillText(fvgSig), bgcolor = pillColor(fvgSig != 0, fvgSig > 0), text_color = color.white)
+    table.cell(dash, 2, 20, enFVG ? "yes" : "no", text_color = enFVG ? color.green : color.gray)
+
+    // ---- Ensemble verdict + sizing
+    verdict = goLong ? "→ LONG" : goShort ? "→ SHORT" : "—"
+    verdictColor = goLong ? color.green : goShort ? color.red : color.gray
+    table.cell(dash, 0, 21, str.format("ENSEMBLE  L{0}/S{1}", longVotes, shortVotes),
+                  bgcolor = color.new(color.gray, 30), text_color = color.white)
+    table.cell(dash, 1, 21, str.format("qty {0}", str.tostring(qtyOrder, "#.##")))
+    table.cell(dash, 2, 21, verdict,
+                  bgcolor = color.new(verdictColor, goLong or goShort ? 0 : 70), text_color = color.white)
+
+
+// =============================================================================
+//  ALERTS
+//
+//  Strategy alerts fire whenever an order action happens — TradingView wires
+//  these natively through "Any alert() function call". The custom conditions
+//  below are for non-execution events (e.g., squeezes firing).
+// =============================================================================
+
+alertcondition(goLong  and canEnterLong,
+     title   = "Algotrader: LONG entry signal",
+     message = "{{ticker}} {{interval}} — LONG entry  votes={{strategy.position_size}}  close={{close}}")
+
+alertcondition(goShort and canEnterShort,
+     title   = "Algotrader: SHORT entry signal",
+     message = "{{ticker}} {{interval}} — SHORT entry  close={{close}}")
+
+alertcondition(isSqueezed and not isSqueezed[1],
+     title   = "BB squeeze starting",
+     message = "{{ticker}} {{interval}} — BB compressed inside Keltner")
+
+alertcondition(not isSqueezed and isSqueezed[1],
+     title   = "BB squeeze fired",
+     message = "{{ticker}} {{interval}} — squeeze released; close={{close}}  basis={{plot(\"BB basis\")}}")

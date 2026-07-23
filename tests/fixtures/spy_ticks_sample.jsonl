@@ -1,0 +1,8 @@
+# Synthetic SPY tick sample. 2026-05-25 13:30:00 UTC, 1-minute span. Trades only.
+{"type":"tick","ts":"2026-05-25T13:30:00.100Z","symbol":"SPY","asset_class":"ETF","venue":"ARCA","last_price":"555.00","last_size":"100"}
+{"type":"tick","ts":"2026-05-25T13:30:15.250Z","symbol":"SPY","asset_class":"ETF","venue":"ARCA","last_price":"555.20","last_size":"50"}
+{"type":"tick","ts":"2026-05-25T13:30:30.500Z","symbol":"SPY","asset_class":"ETF","venue":"ARCA","last_price":"554.95","last_size":"75"}
+{"type":"tick","ts":"2026-05-25T13:30:45.750Z","symbol":"SPY","asset_class":"ETF","venue":"ARCA","last_price":"555.10","last_size":"60"}
+{"type":"tick","ts":"2026-05-25T13:31:00.001Z","symbol":"SPY","asset_class":"ETF","venue":"ARCA","last_price":"555.30","last_size":"120"}
+{"type":"tick","ts":"2026-05-25T13:31:30.000Z","symbol":"SPY","asset_class":"ETF","venue":"ARCA","last_price":"555.40","last_size":"80"}
+{"type":"tick","ts":"2026-05-25T13:32:00.000Z","symbol":"SPY","asset_class":"ETF","venue":"ARCA","last_price":"555.50","last_size":"40"}

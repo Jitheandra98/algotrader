@@ -1,0 +1,39 @@
+# Default config — applied first, then env-specific YAML, then local.yaml, then env vars.
+# Everything here defaults to paper trading. Do NOT set `live: true` in this file.
+
+env: dev
+live: false
+
+logging:
+  level: INFO
+  format: console
+
+redis:
+  url: redis://localhost:6379/0
+  stream_max_len: 1000000
+  consumer_block_ms: 5000
+
+database:
+  url: postgresql://algotrader:algotrader@localhost:5432/algotrader
+  pool_min: 2
+  pool_max: 10
+
+broker:
+  name: alpaca
+  live: false
+  base_url: https://paper-api.alpaca.markets
+  data_url: https://data.alpaca.markets
+  rate_limit_per_minute: 200
+
+risk:
+  max_per_trade_risk_pct: "0.005"   # 0.5% per trade
+  max_portfolio_risk_pct: "0.02"    # 2% total at-risk
+  max_daily_loss_pct: "0.03"
+  max_weekly_loss_pct: "0.08"
+  max_consecutive_losses: 5
+  max_gross_leverage: "2.0"
+  max_net_leverage: "1.5"
+  enforce_pdt_rule: true
+  pdt_threshold_equity: "25000"
+
+strategies: []

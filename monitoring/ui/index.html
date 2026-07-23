@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>algotrader operator</title>
+  <style>
+    :root {
+      --bg: #0d1117; --panel: #161b22; --border: #30363d;
+      --fg: #c9d1d9; --muted: #8b949e; --accent: #58a6ff;
+      --green: #3fb950; --red: #f85149; --yellow: #d29922;
+    }
+    * { box-sizing: border-box; }
+    body { background: var(--bg); color: var(--fg); font-family: -apple-system,Inter,Helvetica,Arial,sans-serif; margin: 0; padding: 20px; font-size: 13px; }
+    h1 { margin: 0 0 16px 0; font-weight: 500; font-size: 18px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+    .card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; flex: 1; min-width: 280px; }
+    .card h2 { margin: 0 0 10px 0; font-size: 12px; text-transform: uppercase; color: var(--muted); letter-spacing: 0.5px; font-weight: 600; }
+    .stat { font-size: 22px; font-weight: 500; }
+    .stat .sub { font-size: 12px; color: var(--muted); margin-left: 8px; }
+    .pos { color: var(--green); }
+    .neg { color: var(--red); }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 500; }
+    td { font-family: SF Mono, Menlo, monospace; }
+    button { background: var(--accent); color: white; border: 0; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+    button.danger { background: var(--red); }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 500; }
+    .pill.ok { background: rgba(63,185,80,0.15); color: var(--green); }
+    .pill.warn { background: rgba(210,153,34,0.15); color: var(--yellow); }
+    .pill.bad { background: rgba(248,81,73,0.15); color: var(--red); }
+    .row.tight { gap: 0; }
+  </style>
+</head>
+<body>
+  <h1>algotrader · operator</h1>
+  <div id="content">
+    <div class="row">
+      <div class="card">
+        <h2>Equity</h2>
+        <div id="equity" class="stat">—</div>
+      </div>
+      <div class="card">
+        <h2>Cash</h2>
+        <div id="cash" class="stat">—</div>
+      </div>
+      <div class="card">
+        <h2>Open positions</h2>
+        <div id="position-count" class="stat">—</div>
+      </div>
+      <div class="card">
+        <h2>Kill switch</h2>
+        <div id="ks-state" class="stat">—</div>
+        <div style="margin-top:10px"><button id="ks-trip" class="danger">trip</button> <button id="ks-reset">reset</button></div>
+      </div>
+    </div>
+    <div class="row">
+      <div class="card" style="flex:2">
+        <h2>Positions</h2>
+        <table>
+          <thead><tr><th>Symbol</th><th>Qty</th><th>Avg</th><th>Mark</th><th>UPL</th></tr></thead>
+          <tbody id="positions-tbl"></tbody>
+        </table>
+      </div>
+      <div class="card" style="flex:3">
+        <h2>Health</h2>
+        <table>
+          <thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead>
+          <tbody id="health-tbl"></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="row">
+      <div class="card" style="flex:3">
+        <h2>Recent risk decisions</h2>
+        <table>
+          <thead><tr><th>Strategy</th><th>Instrument</th><th>Dir</th><th>Allowed</th><th>Rejections</th></tr></thead>
+          <tbody id="risk-tbl"></tbody>
+        </table>
+      </div>
+      <div class="card" style="flex:2">
+        <h2>Recent fills</h2>
+        <table>
+          <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th></tr></thead>
+          <tbody id="fills-tbl"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  <script>
+    const fmt = (n, d=2) => n === null || n === undefined ? '—' : Number(n).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+
+    async function refresh() {
+      try {
+        const [pf, pos, fills, risk, health, ks] = await Promise.all([
+          fetch('/api/portfolio').then(r => r.json()),
+          fetch('/api/positions').then(r => r.json()),
+          fetch('/api/fills?limit=20').then(r => r.json()),
+          fetch('/api/risk-audit?limit=20').then(r => r.json()),
+          fetch('/api/health').then(r => r.json()),
+          fetch('/api/kill-switch').then(r => r.json()).catch(() => null),
+        ]);
+
+        document.getElementById('equity').textContent = '$' + fmt(pf.equity);
+        document.getElementById('cash').textContent = '$' + fmt(pf.cash);
+        document.getElementById('position-count').textContent = pos.length;
+
+        const ksEl = document.getElementById('ks-state');
+        if (ks === null) ksEl.textContent = 'n/a';
+        else if (ks.tripped) ksEl.innerHTML = '<span class="pill bad">TRIPPED</span>';
+        else ksEl.innerHTML = '<span class="pill ok">ARMED</span>';
+
+        const posTbl = document.getElementById('positions-tbl');
+        posTbl.innerHTML = pos.map(p => `<tr>
+          <td>${p.instrument.symbol}</td>
+          <td>${p.quantity}</td>
+          <td>${fmt(p.average_price)}</td>
+          <td>${fmt(p.current_price)}</td>
+          <td class="${parseFloat(p.unrealized_pnl) >= 0 ? 'pos' : 'neg'}">${fmt(p.unrealized_pnl)}</td>
+        </tr>`).join('') || '<tr><td colspan="5">no positions</td></tr>';
+
+        const healthTbl = document.getElementById('health-tbl');
+        const checks = health.checks || {};
+        healthTbl.innerHTML = Object.entries(checks).map(([n, s]) => `<tr>
+          <td>${n}</td>
+          <td><span class="pill ${s.healthy ? 'ok' : 'bad'}">${s.healthy ? 'OK' : 'FAIL'}</span></td>
+          <td>${s.detail}</td>
+        </tr>`).join('') || '<tr><td colspan="3">no checks</td></tr>';
+
+        const riskTbl = document.getElementById('risk-tbl');
+        riskTbl.innerHTML = risk.slice().reverse().slice(0, 20).map(d => `<tr>
+          <td>${d.signal.strategy_id}</td>
+          <td>${d.signal.instrument.symbol}</td>
+          <td>${d.signal.direction}</td>
+          <td><span class="pill ${d.allowed ? 'ok' : 'bad'}">${d.allowed ? 'YES' : 'NO'}</span></td>
+          <td>${d.rejections.map(r => r.limit).join(', ')}</td>
+        </tr>`).join('') || '<tr><td colspan="5">none yet</td></tr>';
+
+        const fillsTbl = document.getElementById('fills-tbl');
+        fillsTbl.innerHTML = fills.slice().reverse().slice(0, 20).map(f => `<tr>
+          <td>${f.instrument.symbol}</td>
+          <td>${f.side}</td>
+          <td>${f.quantity}</td>
+          <td>${fmt(f.price)}</td>
+        </tr>`).join('') || '<tr><td colspan="4">none yet</td></tr>';
+      } catch (err) {
+        console.error('refresh failed', err);
+      }
+    }
+
+    document.getElementById('ks-trip').onclick = async () => {
+      const reason = prompt('Reason for tripping?', 'operator manual');
+      if (!reason) return;
+      await fetch('/api/kill-switch/trip?reason=' + encodeURIComponent(reason), { method: 'POST' });
+      refresh();
+    };
+    document.getElementById('ks-reset').onclick = async () => {
+      await fetch('/api/kill-switch/reset', { method: 'POST' });
+      refresh();
+    };
+
+    refresh();
+    setInterval(refresh, 2000);
+  </script>
+</body>
+</html>

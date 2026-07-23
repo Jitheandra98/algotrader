@@ -1,0 +1,18 @@
+# One-shot Alembic migration job. Run with: kubectl apply -f migrations-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate-{{ deployTimestamp }}
+  namespace: algotrader
+spec:
+  backoffLimit: 2
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: algotrader:latest
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - secretRef:
+                name: algotrader-secrets

@@ -1,0 +1,1504 @@
+// =============================================================================
+//  APEX FLOW v1.0 — Multi-Strategy Ensemble × ICT Market Context
+//
+//  Synthesis of:
+//    • algotrader.pine    — modular multi-strategy voting + per-strategy diags
+//    • QUANTUM FLOW v19   — ICT structure, OBs, FVGs, sweeps, magnets, sessions,
+//                            HTF bias, P/D gate, OB guard, WR tracker with $ P&L
+//
+//  Design principle: every QUANTUM signal engine becomes ONE strategy among many.
+//  algotrader's voting + per-strategy enable becomes the orchestration layer.
+//  Result: 12 independent strategies feed into a context-aware ensemble, scored
+//  on confluence (HP), filtered by hard gates (bias / OB / P/D / ADR / chop), and
+//  graded S / A+ / A / B / C with real $ P&L tracking per strategy.
+//
+//  How to read this file:
+//    §1  PROFILE      Auto-tune by instrument
+//    §2  INPUTS       All knobs, grouped & tooltipped
+//    §3  CONTEXT      ATR, EMAs, sessions, HTF bias, structure, OBs, FVGs, …
+//    §4  STRATEGIES   12 vote sources, each emits +1 / -1 / 0 per bar
+//    §5  ENSEMBLE     Vote tally + HP confluence + grade
+//    §6  GATES        Bias, P/D, OB-guard, ADR, chop, pattern
+//    §7  RISK         Fixed-$ (gold) or ATR-stop with R-target + size
+//    §8  PERFORMANCE  Per-strategy WR + $ P&L + profit factor + expectancy
+//    §9  PLOTS        Overlays + per-strategy markers + ensemble triangles
+//    §10 DASHBOARD    Everything visible
+//    §11 ALERTS       Per-strategy + ensemble + warn
+// =============================================================================
+
+//@version=6
+indicator(
+     title              = "APEX FLOW v1.0 — Multi-Strategy Ensemble × ICT",
+     shorttitle         = "APEX",
+     overlay            = true,
+     max_labels_count   = 500,
+     max_lines_count    = 500,
+     max_boxes_count    = 500,
+     max_bars_back      = 2000)
+
+
+// =============================================================================
+//  §1  PROFILE — instrument auto-detection + manual override
+// =============================================================================
+
+isGold = str.contains(str.upper(syminfo.ticker), "XAU") or str.contains(str.upper(syminfo.ticker), "GOLD") or str.contains(str.upper(syminfo.ticker), "GC")
+isNQ   = str.contains(str.upper(syminfo.ticker), "NQ")  or str.contains(str.upper(syminfo.ticker), "MNQ")
+isES   = str.contains(str.upper(syminfo.ticker), "ES")  or str.contains(str.upper(syminfo.ticker), "MES") or str.contains(str.upper(syminfo.ticker), "SPX")
+isEU   = str.contains(str.upper(syminfo.ticker), "EUR") and str.contains(str.upper(syminfo.ticker), "USD")
+isGU   = str.contains(str.upper(syminfo.ticker), "GBP") and str.contains(str.upper(syminfo.ticker), "USD")
+isUJ   = str.contains(str.upper(syminfo.ticker), "USD") and str.contains(str.upper(syminfo.ticker), "JPY")
+isBTC  = str.contains(str.upper(syminfo.ticker), "BTC") or str.contains(str.upper(syminfo.ticker), "MBT")
+isFX   = isEU or isGU or isUJ
+
+profDisplMult = isGold ? 1.3 : isNQ ? 1.5 : isES ? 1.2 : isFX ? 1.4 : isBTC ? 1.3 : 1.3
+profSweepTol  = isGold ? 0.10: isNQ ? 0.08: isES ? 0.06: isFX ? 0.12: isBTC ? 0.10: 0.10
+profCorr1     = isGold ? "TVC:DXY" : isNQ ? "CME_MINI:ES1!" : isES ? "CME_MINI:NQ1!" : isEU ? "TVC:DXY" : isGU ? "TVC:DXY" : isUJ ? "FX:EURUSD" : isBTC ? "BINANCE:ETHUSD" : "TVC:DXY"
+profName      = isGold ? "GOLD" : isNQ ? "NQ" : isES ? "ES" : isEU ? "EUR/USD" : isGU ? "GBP/USD" : isUJ ? "USD/JPY" : isBTC ? "BTC" : "GENERAL"
+
+
+// =============================================================================
+//  §2  INPUTS
+// =============================================================================
+
+// ──── Display ────────────────────────────────────────────────────────────────
+GR_DISP = "═══ Display ═══"
+showDash      = input.bool(true, "Master dashboard",                group = GR_DISP)
+showStratDots = input.bool(true, "Per-strategy diagnostic dots",     group = GR_DISP, tooltip = "Small markers above/below bars showing which individual strategies fired.")
+showOverlays  = input.bool(true, "Plot MAs + Bollinger overlays",    group = GR_DISP)
+showStops     = input.bool(true, "Plot stop / target on entry",      group = GR_DISP)
+showOBs       = input.bool(true, "Plot Order Blocks",                group = GR_DISP)
+showFVGs      = input.bool(true, "Plot Fair-Value Gaps",             group = GR_DISP)
+showSessions  = input.bool(true, "Plot session boxes",               group = GR_DISP)
+showMagnets   = input.bool(true, "Plot magnet levels",               group = GR_DISP)
+showHTFZones  = input.bool(true, "Plot HTF zones (D/4H)",            group = GR_DISP)
+showLiquidity = input.bool(true, "Plot liquidity pools (BSL/SSL)",   group = GR_DISP)
+dashPos       = input.string("top_right", "Dashboard position", options=["top_right","top_left","bottom_right","bottom_left","middle_right","middle_left"], group = GR_DISP)
+
+// ──── Risk / Sizing ──────────────────────────────────────────────────────────
+GR_RISK = "═══ Risk / Sizing ═══"
+notionalEq    = input.float(100000, "Notional equity (USD)",                 minval = 1000,                group = GR_RISK)
+riskPctTrade  = input.float(0.5,    "Risk per trade (%)",                     minval = 0.05, maxval = 5,    step = 0.05, group = GR_RISK) / 100.0
+maxPosPct     = input.float(20,     "Max position (% of equity)",             minval = 1,    maxval = 100,                group = GR_RISK) / 100.0
+atrStopMult   = input.float(2.0,    "ATR stop multiplier",                    minval = 0.5,  maxval = 10,   step = 0.1,   group = GR_RISK)
+rMultiple     = input.float(2.0,    "Target R multiple",                      minval = 0.5,  maxval = 10,   step = 0.1,   group = GR_RISK)
+atrLen        = input.int(14,       "ATR length",                              minval = 2,                                 group = GR_RISK)
+useFixedSLTP  = input.bool(true,    "Use fixed $ SL/TP on Gold",              group = GR_RISK, tooltip = "Auto-applies when chart is XAU/GOLD/GC. Overrides ATR sizing for stops + targets.")
+fixedSL       = input.float(20.0,   "  Fixed $ SL (gold)",                    minval = 1,    step = 1,                    group = GR_RISK)
+fixedTP       = input.float(50.0,   "  Fixed $ TP (gold)",                    minval = 1,    step = 1,                    group = GR_RISK)
+
+// ──── Ensemble ───────────────────────────────────────────────────────────────
+GR_ENS  = "═══ Ensemble ═══"
+useEnsemble   = input.bool(false, "Require ensemble confirmation",            group = GR_ENS, tooltip = "OFF: any single strategy fires a trade (use HP grade to filter). ON: ≥ N strategies must agree.")
+minVotes      = input.int(2,      "Min agreeing strategies",                   minval = 1, maxval = 12,                    group = GR_ENS)
+useHPGate     = input.bool(true,  "Require HP grade ≥ B",                      group = GR_ENS, tooltip = "Block C-grade trades. Set false to take every signal regardless of confluence.")
+useGradeS_HP  = input.int(8,      "Grade S min HP",                            minval = 4, maxval = 25,                    group = GR_ENS)
+useGradeAp_HP = input.int(6,      "Grade A+ min HP",                           minval = 3, maxval = 20,                    group = GR_ENS)
+useGradeA_HP  = input.int(4,      "Grade A min HP",                            minval = 2, maxval = 15,                    group = GR_ENS)
+useGradeB_HP  = input.int(2,      "Grade B min HP",                            minval = 1, maxval = 10,                    group = GR_ENS)
+
+// ──── STRATEGY ENABLES (master toggles) ──────────────────────────────────────
+GR_STR  = "═══ Strategy ENABLES (master switches) ═══"
+enSMA      = input.bool(true,  "1) SMA crossover (trend follow)",              group = GR_STR)
+enRSI      = input.bool(true,  "2) RSI mean reversion (oversold + uptrend)",   group = GR_STR)
+enBB       = input.bool(true,  "3) Bollinger squeeze breakout",                 group = GR_STR)
+enTD       = input.bool(true,  "4) TD Sequential setup-9",                     group = GR_STR)
+enVCP      = input.bool(true,  "5) VCP breakout (pivot + volume)",             group = GR_STR)
+enFVGFill  = input.bool(true,  "6) FVG fill (price returns to gap)",           group = GR_STR)
+enSwpZone  = input.bool(true,  "7) Sweep + zone reaction (ICT)",               group = GR_STR)
+enBOSRet   = input.bool(true,  "8) BOS retest entry",                          group = GR_STR)
+enMagnet   = input.bool(true,  "9) Magnet level hit (HRS)",                    group = GR_STR)
+enHTFZone  = input.bool(true,  "10) HTF zone tap (D/4H pivot)",                group = GR_STR)
+enOTE      = input.bool(true,  "11) OTE pullback (62-79% Fib)",                group = GR_STR)
+enOBRea    = input.bool(true,  "12) Order Block reaction",                     group = GR_STR)
+
+// ──── Per-strategy params ────────────────────────────────────────────────────
+GR_P_SMA = "Params: SMA Crossover"
+smaFast    = input.int(20, "Fast SMA", minval=2, group=GR_P_SMA)
+smaSlow    = input.int(50, "Slow SMA", minval=3, group=GR_P_SMA)
+GR_P_RSI = "Params: RSI Mean Reversion"
+rsiLen     = input.int(14, "RSI length",    minval=2,  group=GR_P_RSI)
+rsiOS      = input.float(30, "Oversold",    minval=5,  maxval=50, group=GR_P_RSI)
+rsiOB      = input.float(70, "Overbought",  minval=50, maxval=95, group=GR_P_RSI)
+rsiTrendL  = input.int(200, "Trend SMA",    minval=10, group=GR_P_RSI)
+rsiShort   = input.bool(false,"Allow shorts",            group=GR_P_RSI)
+GR_P_BB  = "Params: Bollinger Squeeze"
+bbLen      = input.int(20,  "BB length",    minval=5,   group=GR_P_BB)
+bbK        = input.float(2.0, "BB std-dev", minval=0.5, group=GR_P_BB)
+keltLen    = input.int(20,  "Keltner length", minval=5, group=GR_P_BB)
+keltK      = input.float(1.5, "Keltner ATR×", minval=0.5,group=GR_P_BB)
+GR_P_TD  = "Params: TD Sequential"
+tdThresh   = input.int(9, "Setup threshold", minval=4, group=GR_P_TD)
+GR_P_VCP = "Params: VCP"
+vcpPivot   = input.int(20,  "Pivot lookback", minval=5, group=GR_P_VCP)
+vcpVolMult = input.float(1.5, "Volume mult", minval=1.0, step=0.1, group=GR_P_VCP)
+GR_P_FVG = "Params: FVG Fill"
+fvgMinMult = input.float(0.3, "Min FVG size (ATR×)", minval=0.05, group=GR_P_FVG)
+fvgMaxAge  = input.int(50, "Max FVG age (bars)", minval=5, group=GR_P_FVG)
+GR_P_SWP = "Params: Sweep + Zone"
+sweepTolPct= input.float(0.0, "Sweep tol override (0=profile)", minval=0.0, maxval=0.5, step=0.01, group=GR_P_SWP, tooltip="0 → use instrument-profile default. Otherwise an absolute ATR multiplier.")
+rejCloc    = input.float(55, "Bull rejection cloc>", minval=30, maxval=80, group=GR_P_SWP)
+rejWickR   = input.float(0.3,"Min rejection wick ratio", minval=0.1, maxval=0.8, step=0.05, group=GR_P_SWP)
+GR_P_BOS = "Params: BOS Retest"
+retestMin  = input.int(2,   "Min bars since BOS",  minval=1, group=GR_P_BOS)
+retestMax  = input.int(25,  "Max bars since BOS",  minval=5, group=GR_P_BOS)
+retestTol  = input.float(0.3, "Tol (ATR)",         minval=0.1, step=0.05, group=GR_P_BOS)
+GR_P_MAG = "Params: Magnet (HRS)"
+hrsTolATR  = input.float(0.20, "Level cluster tol (ATR)", minval=0.05, maxval=0.50, step=0.05, group=GR_P_MAG)
+hrsMaxLev  = input.int(80,    "Max tracked levels",        minval=20, maxval=200, group=GR_P_MAG)
+magAgree   = input.int(3,     "Min HTF-agreement count",   minval=2,  maxval=10,  group=GR_P_MAG)
+GR_P_HTF = "Params: HTF Zones"
+htfBufATR  = input.float(0.10, "Buffer (ATR)", minval=0.0, maxval=1.0, step=0.05, group=GR_P_HTF)
+GR_P_OTE = "Params: OTE"
+oteHi      = input.float(0.62, "OTE high fib", minval=0.382, maxval=0.886, step=0.01, group=GR_P_OTE)
+oteLo      = input.float(0.79, "OTE low fib",  minval=0.5,   maxval=0.95,  step=0.01, group=GR_P_OTE)
+oteWindow  = input.int(30,     "OTE active window (bars)", minval=5, group=GR_P_OTE)
+
+// ──── HTF Bias ───────────────────────────────────────────────────────────────
+GR_BIAS = "═══ HTF Bias ═══"
+biasMode  = input.string("4H/30m", "Bias mode", options = ["Weekly/Daily","Daily/4H","4H/30m","30m/3m"], group = GR_BIAS)
+htfWeight = input.int(40, "HTF weight %",  minval=20, maxval=70, step=5, group = GR_BIAS)
+ltfWeight = input.int(60, "LTF weight %",  minval=30, maxval=80, step=5, group = GR_BIAS)
+biasNeutralOK = input.bool(true, "Allow neutral bias for entries", group = GR_BIAS)
+biasStrong = input.int(50,  "Strong bias |score|",         minval=20, maxval=120, group = GR_BIAS)
+biasWeak   = input.int(20,  "Active/weak bias |score|",    minval=5,  maxval=80,  group = GR_BIAS)
+biasHardBlk= input.int(40,  "Hard block opposite |score|", minval=10, maxval=120, group = GR_BIAS)
+
+// ──── Sessions ───────────────────────────────────────────────────────────────
+GR_SESS = "═══ Sessions ═══"
+tokyoTime  = input.session("0000-0900", "Tokyo (UTC)",   group = GR_SESS)
+londonTime = input.session("0800-1630", "London (UTC)",  group = GR_SESS)
+nyTime     = input.session("1300-2200", "New York (UTC)",group = GR_SESS)
+sessZone   = input.string("UTC", "Timezone", group = GR_SESS)
+sbLN       = input.session("0800-0900", "Silver Bullet — London", group = GR_SESS)
+sbNYAM     = input.session("1500-1600", "Silver Bullet — NY AM",  group = GR_SESS)
+sbNYPM     = input.session("1900-2000", "Silver Bullet — NY PM",  group = GR_SESS)
+sessGate   = input.bool(false, "Require active session for entries", group = GR_SESS)
+
+// ──── Risk Gates ─────────────────────────────────────────────────────────────
+GR_GATE = "═══ Risk Gates ═══"
+usePDGate  = input.bool(true,  "P/D gate: Buys in disc / Sells in prem",      group = GR_GATE)
+discMaxPct = input.float(50.0, "  Buy: max P/D %",         minval=20, maxval=60, step=5, group = GR_GATE)
+premMinPct = input.float(50.0, "  Sell: min P/D %",        minval=40, maxval=80, step=5, group = GR_GATE)
+useOBGuard = input.bool(true,  "OB guard: block trade toward opposing OB",     group = GR_GATE)
+obGuardATR = input.float(2.0,  "  OB guard distance (ATR)",minval=0.5, maxval=5, step=0.5, group = GR_GATE)
+useADR     = input.bool(true,  "ADR exhaustion gate",                          group = GR_GATE)
+adrExhPct  = input.float(85,   "  ADR hard block %",       minval=50, maxval=120, group = GR_GATE)
+useChopGate= input.bool(true,  "Hard chop gate",                                group = GR_GATE)
+useBiasGate= input.bool(true,  "Hard bias gate",                                group = GR_GATE)
+useCoolDn  = input.int(6,      "Cooldown between entries (bars)", minval=1, maxval=30, group = GR_GATE)
+
+// ──── HP Confluence Weights ──────────────────────────────────────────────────
+GR_HP = "═══ HP Confluence Weights ═══"
+hp_magnet  = input.int(5, "Magnet hit",         group = GR_HP, minval=0, maxval=15)
+hp_sweep   = input.int(3, "Sweep + zone",       group = GR_HP, minval=0, maxval=10)
+hp_htf     = input.int(3, "HTF zone tap",       group = GR_HP, minval=0, maxval=10)
+hp_bos     = input.int(2, "BOS retest",         group = GR_HP, minval=0, maxval=10)
+hp_ote     = input.int(2, "OTE pullback",       group = GR_HP, minval=0, maxval=10)
+hp_ob      = input.int(2, "OB reaction",        group = GR_HP, minval=0, maxval=10)
+hp_div     = input.int(2, "Divergence agree",   group = GR_HP, minval=0, maxval=10)
+hp_smt     = input.int(2, "SMT divergence",     group = GR_HP, minval=0, maxval=10)
+hp_flow    = input.int(2, "Volume + delta agree",group= GR_HP, minval=0, maxval=10)
+hp_sb      = input.int(2, "Silver Bullet window",group= GR_HP, minval=0, maxval=10)
+hp_extPD   = input.int(2, "Extreme P/D",        group = GR_HP, minval=0, maxval=10)
+hp_pen_chop= input.int(3, "Penalty: chop",      group = GR_HP, minval=0, maxval=10)
+hp_pen_adr = input.int(2, "Penalty: ADR exhaust",group= GR_HP, minval=0, maxval=10)
+hp_pen_bias= input.int(2, "Penalty: soft bias block",group=GR_HP, minval=0, maxval=10)
+
+
+// =============================================================================
+//  §3  CONTEXT — common math + structure + sessions + bias + OBs + FVGs + …
+// =============================================================================
+
+// Resolve effective sweep tolerance (input override > profile default)
+sweepTol = sweepTolPct > 0.0 ? sweepTolPct : profSweepTol
+
+// Common indicators
+atrVal   = ta.atr(atrLen)
+atr200   = ta.atr(200)
+emaF     = ta.ema(close, 9)
+emaM     = ta.ema(close, 21)
+emaS     = ta.ema(close, 50)
+ema200v  = ta.ema(close, 200)
+volSMA   = ta.sma(volume, 20)
+volR     = volume / math.max(volSMA, 1)
+prng     = high - low
+body     = math.abs(close - open)
+cloc     = prng > 0 ? 100.0 * (close - low) / prng : 50.0
+lowerWick= math.min(close, open) - low
+upperWick= high - math.max(close, open)
+lowerWickR = prng > 0 ? lowerWick / prng : 0
+upperWickR = prng > 0 ? upperWick / prng : 0
+bodyR    = prng > 0 ? body / prng : 0.5
+avgBody10= ta.sma(body, 10)
+
+// Day boundary detection
+var int prevDayN = na
+isNewDay = false
+cd = dayofmonth(time)
+if na(prevDayN) or cd != prevDayN
+    isNewDay := true
+prevDayN := cd
+
+
+// ──── Sessions ───────────────────────────────────────────────────────────────
+dayFilter = ":1234567"
+inTK = not na(time(timeframe.period, tokyoTime  + dayFilter, sessZone)) and timeframe.isintraday
+inLN = not na(time(timeframe.period, londonTime + dayFilter, sessZone)) and timeframe.isintraday
+inNY = not na(time(timeframe.period, nyTime     + dayFilter, sessZone)) and timeframe.isintraday
+inActive = inTK or inLN or inNY
+inSBLN = not na(time(timeframe.period, sbLN   + dayFilter, sessZone)) and timeframe.isintraday
+inSBNA = not na(time(timeframe.period, sbNYAM + dayFilter, sessZone)) and timeframe.isintraday
+inSBNP = not na(time(timeframe.period, sbNYPM + dayFilter, sessZone)) and timeframe.isintraday
+inSB   = inSBLN or inSBNA or inSBNP
+
+
+// ──── HTF Bias ───────────────────────────────────────────────────────────────
+htfTF = biasMode == "Weekly/Daily" ? "W" : biasMode == "Daily/4H" ? "D" : biasMode == "4H/30m" ? "240" : "30"
+ltfTF = biasMode == "Weekly/Daily" ? "D" : biasMode == "Daily/4H" ? "240" : biasMode == "4H/30m" ? "30" : "3"
+htfClose1 = request.security(syminfo.tickerid, htfTF, close[1], lookahead=barmerge.lookahead_off)
+htfOpen1  = request.security(syminfo.tickerid, htfTF, open[1],  lookahead=barmerge.lookahead_off)
+htfE9     = request.security(syminfo.tickerid, htfTF, ta.ema(close, 9),  lookahead=barmerge.lookahead_off)
+htfE21    = request.security(syminfo.tickerid, htfTF, ta.ema(close, 21), lookahead=barmerge.lookahead_off)
+htfCur    = request.security(syminfo.tickerid, htfTF, close, lookahead=barmerge.lookahead_off)
+htfCurO   = request.security(syminfo.tickerid, htfTF, open,  lookahead=barmerge.lookahead_off)
+ltfClose1 = request.security(syminfo.tickerid, ltfTF, close[1], lookahead=barmerge.lookahead_off)
+ltfOpen1  = request.security(syminfo.tickerid, ltfTF, open[1],  lookahead=barmerge.lookahead_off)
+ltfE9     = request.security(syminfo.tickerid, ltfTF, ta.ema(close, 9),  lookahead=barmerge.lookahead_off)
+ltfE21    = request.security(syminfo.tickerid, ltfTF, ta.ema(close, 21), lookahead=barmerge.lookahead_off)
+
+htfBias = (not na(htfClose1) and htfClose1 > htfOpen1 ? 25 : -25) + (not na(htfCur) and htfCur > htfCurO ? 35 : -35) + (not na(htfE9) and not na(htfE21) ? (htfE9 > htfE21 ? 40 : -40) : 0)
+ltfBias = (not na(ltfClose1) and ltfClose1 > ltfOpen1 ? 20 : -20) + (not na(ltfE9) and not na(ltfE21) ? (ltfE9 > ltfE21 ? 30 : -30) : 0) + (close > ema200v ? 20 : -20)
+totalW  = math.max(htfWeight + ltfWeight, 1)
+combBias= math.round((htfBias * htfWeight + ltfBias * ltfWeight) / totalW)
+biasTxt = combBias >= biasStrong ? "STRONG BULL" : combBias >= biasWeak ? "BULL" : combBias <= -biasStrong ? "STRONG BEAR" : combBias <= -biasWeak ? "BEAR" : "NEUTRAL"
+biasBull = combBias >= biasWeak
+biasBear = combBias <= -biasWeak
+biasNeut = not biasBull and not biasBear
+hardBlkBuy  = useBiasGate and combBias <= -biasHardBlk
+hardBlkSell = useBiasGate and combBias >=  biasHardBlk
+biasAllowBuy  = not hardBlkBuy  and (biasBull or (biasNeut and biasNeutralOK))
+biasAllowSell = not hardBlkSell and (biasBear or (biasNeut and biasNeutralOK))
+
+
+// ──── P/D Equilibrium ────────────────────────────────────────────────────────
+pdLookback = timeframe.in_seconds() <= 300 ? 200 : timeframe.in_seconds() <= 900 ? 150 : timeframe.in_seconds() <= 3600 ? 100 : 50
+swHi100 = ta.highest(high, pdLookback)
+swLo100 = ta.lowest(low,   pdLookback)
+swMid   = (swHi100 + swLo100) / 2.0
+pdPct   = swHi100 != swLo100 ? (close - swLo100) / (swHi100 - swLo100) * 100 : 50.0
+pdPctClamp = math.max(-50, math.min(200, pdPct))
+inDisc = close < swMid
+inPrem = close > swMid
+
+
+// ──── ADR Exhaustion ─────────────────────────────────────────────────────────
+dATR = request.security(syminfo.tickerid, "D", ta.atr(14), lookahead=barmerge.lookahead_off)
+var float dayHi = na, var float dayLo = na
+if isNewDay
+    dayHi := high
+    dayLo := low
+else
+    dayHi := math.max(nz(dayHi, high), high)
+    dayLo := math.min(nz(dayLo, low), low)
+dayRange = nz(dayHi) - nz(dayLo)
+adrPct   = not na(dATR) and dATR > 0 ? dayRange / dATR * 100 : 0
+adrExhausted = useADR and adrPct >= adrExhPct
+adrTxt = adrPct >= 85 ? "EXHAUSTED" : adrPct >= 65 ? "MATURE" : adrPct < 40 ? "FRESH" : "DEVELOPING"
+
+
+// ──── Chop / Regime Detection (3-factor) ─────────────────────────────────────
+[diP, diM, adx]= ta.dmi(14, 14)
+bbBasis = ta.sma(close, 20)
+bbDev   = 2.0 * ta.stdev(close, 20)
+bbWidth = bbBasis > 0 ? ((bbBasis + bbDev) - (bbBasis - bbDev)) / bbBasis * 100 : 0
+bbWidthSMA = ta.sma(bbWidth, 50)
+chopIdx = 100.0 * math.log10(ta.sma(ta.atr(1), 14) * 14 / (ta.highest(high, 14) - ta.lowest(low, 14))) / math.log10(14)
+bbSqueeze = bbWidth < bbWidthSMA * 0.7
+isChop  = useChopGate and chopIdx > 61.8 and adx < 25 and bbSqueeze
+isTrend = adx > 22 and (math.abs(close - close[14]) / math.max(ta.sma(math.abs(close - close[1]), 14) * 14, 1)) > 0.35
+regTxt  = adx > 35 ? "STRONG TREND" : isTrend ? "TRENDING" : isChop ? "CHOPPY" : adx < 22 ? "RANGING" : "DEVELOPING"
+
+
+// ──── Structure: Internal + Swing BOS/CHoCH (simplified) ─────────────────────
+type pivotPoint
+    float currentLevel
+    float lastLevel
+    bool  crossed = false
+    int   barTime = na
+    int   barIdx  = na
+type trendBias
+    int bias = 0
+
+var pivotPoint swingHi = pivotPoint.new(na, na)
+var pivotPoint swingLo = pivotPoint.new(na, na)
+var pivotPoint intHi   = pivotPoint.new(na, na)
+var pivotPoint intLo   = pivotPoint.new(na, na)
+var trendBias  swingTr = trendBias.new(0)
+var trendBias  intTr   = trendBias.new(0)
+
+intLen  = 5
+swingLen= 50
+_intHigh   = ta.highest(high, intLen)
+_intLow    = ta.lowest(low,   intLen)
+_swgHigh   = ta.highest(high, swingLen)
+_swgLow    = ta.lowest(low,   swingLen)
+var int _intLeg = 0, var int _swgLeg = 0
+if high[intLen] > _intHigh
+    _intLeg := 0
+else if low[intLen] < _intLow
+    _intLeg := 1
+if high[swingLen] > _swgHigh
+    _swgLeg := 0
+else if low[swingLen] < _swgLow
+    _swgLeg := 1
+_intLegChg = ta.change(_intLeg)
+_swgLegChg = ta.change(_swgLeg)
+
+if _intLegChg == -1   // new internal pivot HIGH at intLen bars ago
+    intHi.lastLevel := intHi.currentLevel
+    intHi.currentLevel := high[intLen]
+    intHi.crossed := false
+    intHi.barTime := time[intLen]
+    intHi.barIdx  := bar_index - intLen
+if _intLegChg == 1
+    intLo.lastLevel := intLo.currentLevel
+    intLo.currentLevel := low[intLen]
+    intLo.crossed := false
+    intLo.barTime := time[intLen]
+    intLo.barIdx  := bar_index - intLen
+if _swgLegChg == -1
+    swingHi.lastLevel := swingHi.currentLevel
+    swingHi.currentLevel := high[swingLen]
+    swingHi.crossed := false
+    swingHi.barTime := time[swingLen]
+    swingHi.barIdx  := bar_index - swingLen
+if _swgLegChg == 1
+    swingLo.lastLevel := swingLo.currentLevel
+    swingLo.currentLevel := low[swingLen]
+    swingLo.crossed := false
+    swingLo.barTime := time[swingLen]
+    swingLo.barIdx  := bar_index - swingLen
+
+intBOSBull  = ta.crossover(close, nz(intHi.currentLevel))  and not intHi.crossed
+intBOSBear  = ta.crossunder(close, nz(intLo.currentLevel)) and not intLo.crossed
+swingBOSBull= ta.crossover(close, nz(swingHi.currentLevel)) and not swingHi.crossed
+swingBOSBear= ta.crossunder(close, nz(swingLo.currentLevel)) and not swingLo.crossed
+if intBOSBull
+    intHi.crossed := true
+    intTr.bias := 1
+if intBOSBear
+    intLo.crossed := true
+    intTr.bias := -1
+if swingBOSBull
+    swingHi.crossed := true
+    swingTr.bias := 1
+    bullBreakLevel = swingHi.currentLevel
+if swingBOSBear
+    swingLo.crossed := true
+    swingTr.bias := -1
+    bearBreakLevel = swingLo.currentLevel
+
+
+// ──── Order Blocks (simplified: track last bull/bear OB) ─────────────────────
+type obData
+    float bHigh
+    float bLow
+    int   bTime
+    int   bias       // 1 bull, -1 bear
+    int   touchCount = 0
+
+var array<obData> obs = array.new<obData>()
+
+storeOB(int direction, int lookbackBars) =>
+    // Find the bar within [bar_index - lookbackBars, bar_index] whose extreme matches
+    if lookbackBars > 0 and lookbackBars < bar_index
+        bestIdx = -1
+        if direction == 1   // Bull OB: find the lowest bearish bar
+            float bestLow = na
+            for i = lookbackBars to 1
+                if close[i] < open[i]    // bearish candle
+                    if na(bestLow) or low[i] < bestLow
+                        bestLow := low[i]
+                        bestIdx := i
+            if bestIdx > 0
+                obs.unshift(obData.new(high[bestIdx], low[bestIdx], time[bestIdx], 1, 0))
+        else                                // Bear OB: find highest bullish bar
+            float bestHigh = na
+            for i = lookbackBars to 1
+                if close[i] > open[i]
+                    if na(bestHigh) or high[i] > bestHigh
+                        bestHigh := high[i]
+                        bestIdx := i
+            if bestIdx > 0
+                obs.unshift(obData.new(high[bestIdx], low[bestIdx], time[bestIdx], -1, 0))
+        if obs.size() > 30
+            obs.pop()
+        0
+    0
+
+if intBOSBull
+    storeOB(1, intLen + 5)
+if intBOSBear
+    storeOB(-1, intLen + 5)
+if swingBOSBull
+    storeOB(1, swingLen + 5)
+if swingBOSBear
+    storeOB(-1, swingLen + 5)
+
+// Prune mitigated OBs
+if obs.size() > 0
+    for [idx, ob] in obs
+        if (ob.bias == 1 and close < ob.bLow) or (ob.bias == -1 and close > ob.bHigh)
+            obs.remove(idx)
+
+// Detect OB reaction (price touches OB this bar)
+var bool obBullReact = false
+var bool obBearReact = false
+obBullReact := false
+obBearReact := false
+if obs.size() > 0
+    for [idx, ob] in obs
+        if ob.bias == 1 and low <= ob.bHigh and low >= ob.bLow
+            ob.touchCount += 1
+            obBullReact := true
+            break
+        if ob.bias == -1 and high >= ob.bLow and high <= ob.bHigh
+            ob.touchCount += 1
+            obBearReact := true
+            break
+
+
+// ──── OB Guard (block trades into opposing OB) ───────────────────────────────
+var bool nearSellOB = false
+var bool nearBuyOB  = false
+nearSellOB := false
+nearBuyOB  := false
+if useOBGuard
+    guardDist = atrVal * obGuardATR
+    if obs.size() > 0
+        for [idx, ob] in obs
+            if not nearSellOB and ob.bias == -1 and ob.bLow > close and (ob.bLow - close) < guardDist
+                nearSellOB := true
+            if not nearBuyOB  and ob.bias == 1  and ob.bHigh < close and (close - ob.bHigh) < guardDist
+                nearBuyOB := true
+
+
+// ──── FVG Tracking ───────────────────────────────────────────────────────────
+type FVG
+    float top
+    float bottom
+    bool  isBull
+    int   bornBar
+    int   touchCount = 0
+
+var array<FVG> fvgs = array.new<FVG>()
+fvgMinSize = atrVal * fvgMinMult
+
+if barstate.isconfirmed and not na(high[2]) and not na(low[2])
+    bullGap = low - high[2]
+    bearGap = low[2] - high
+    if bullGap > 0 and bullGap >= fvgMinSize
+        fvgs.push(FVG.new(low, high[2], true, bar_index, 0))
+    if bearGap > 0 and bearGap >= fvgMinSize
+        fvgs.push(FVG.new(low[2], high, false, bar_index, 0))
+
+if fvgs.size() > 0
+    pruned = array.new<FVG>()
+    for [idx, g] in fvgs
+        consumed = (g.isBull and low <= g.bottom) or (not g.isBull and high >= g.top)
+        if (bar_index - g.bornBar) <= fvgMaxAge and not consumed
+            pruned.push(g)
+    fvgs := pruned
+
+var bool fvgBullFill = false
+var bool fvgBearFill = false
+fvgBullFill := false
+fvgBearFill := false
+if fvgs.size() > 0
+    for [idx, g] in fvgs
+        if g.isBull and low <= g.top and low >= g.bottom
+            g.touchCount += 1
+            fvgBullFill := true
+        if not g.isBull and high >= g.bottom and high <= g.top
+            g.touchCount += 1
+            fvgBearFill := true
+
+
+// ──── Liquidity Pools + Sweep ────────────────────────────────────────────────
+type liqPool
+    float level
+    int   touches
+    int   firstBar
+    bool  isHigh
+    bool  swept = false
+
+var array<liqPool> liqs = array.new<liqPool>()
+liqPivLen = 10
+liqPH = ta.pivothigh(high, liqPivLen, liqPivLen)
+liqPL = ta.pivotlow(low,   liqPivLen, liqPivLen)
+if not na(liqPH)
+    found = false
+    for [idx, p] in liqs
+        if p.isHigh and math.abs(p.level - high[liqPivLen]) < atrVal * 0.2
+            p.touches += 1
+            found := true
+            break
+    if not found
+        liqs.unshift(liqPool.new(high[liqPivLen], 1, bar_index - liqPivLen, true))
+if not na(liqPL)
+    found2 = false
+    for [idx, p] in liqs
+        if not p.isHigh and math.abs(p.level - low[liqPivLen]) < atrVal * 0.2
+            p.touches += 1
+            found2 := true
+            break
+    if not found2
+        liqs.unshift(liqPool.new(low[liqPivLen], 1, bar_index - liqPivLen, false))
+if liqs.size() > 0
+    for [idx, p] in liqs
+        if not p.swept
+            if p.isHigh and high > p.level + atrVal * sweepTol
+                p.swept := true
+            else if not p.isHigh and low < p.level - atrVal * sweepTol
+                p.swept := true
+if liqs.size() > 30
+    while liqs.size() > 20
+        liqs.pop()
+
+// Sweep detection for ICT-style signals
+var bool swpBull = false, var bool swpBear = false
+swpBull := false
+swpBear := false
+if liqs.size() > 0
+    for [idx, p] in liqs
+        if p.swept and (bar_index - p.firstBar) > liqPivLen
+            // Recently swept — check if it happened on the current bar
+            if p.isHigh and high > p.level + atrVal * sweepTol and high[1] <= p.level + atrVal * sweepTol
+                swpBear := true
+                break
+            else if not p.isHigh and low < p.level - atrVal * sweepTol and low[1] >= p.level - atrVal * sweepTol
+                swpBull := true
+                break
+
+// Validate sweep with rejection candle
+swpBullValid = swpBull and cloc > rejCloc and lowerWickR > rejWickR
+swpBearValid = swpBear and cloc < (100 - rejCloc) and upperWickR > rejWickR
+
+
+// ──── HTF Zone Import (Daily + 4H pivots) ────────────────────────────────────
+type htfZone
+    float zHigh
+    float zLow
+    int   bias
+    string source
+    int   birthBar
+
+var array<htfZone> htfZones = array.new<htfZone>()
+htfDH = request.security(syminfo.tickerid, "D",   ta.pivothigh(high, 3, 3), lookahead=barmerge.lookahead_off)
+htfDL = request.security(syminfo.tickerid, "D",   ta.pivotlow(low,   3, 3), lookahead=barmerge.lookahead_off)
+htf4H = request.security(syminfo.tickerid, "240", ta.pivothigh(high, 3, 3), lookahead=barmerge.lookahead_off)
+htf4L = request.security(syminfo.tickerid, "240", ta.pivotlow(low,   3, 3), lookahead=barmerge.lookahead_off)
+
+addHTFZone(float hi, float lo, int bias, string src) =>
+    already = false
+    if htfZones.size() > 0
+        for [idx, hz] in htfZones
+            if hz.source == src and math.abs(hz.zHigh - hi) < atrVal * hrsTolATR
+                already := true
+                break
+    if not already
+        htfZones.unshift(htfZone.new(hi, lo, bias, src, bar_index))
+        if htfZones.size() > 30
+            htfZones.pop()
+        0
+    0
+
+if not na(htfDH) and htfDH > 0
+    addHTFZone(htfDH, htfDH - atrVal * htfBufATR, -1, "D-Hi")
+if not na(htfDL) and htfDL > 0
+    addHTFZone(htfDL + atrVal * htfBufATR, htfDL, 1, "D-Lo")
+if not na(htf4H) and htf4H > 0
+    addHTFZone(htf4H, htf4H - atrVal * htfBufATR, -1, "4H-Hi")
+if not na(htf4L) and htf4L > 0
+    addHTFZone(htf4L + atrVal * htfBufATR, htf4L, 1, "4H-Lo")
+
+var bool htfBull = false, var bool htfBear = false
+var string htfSource = ""
+htfBull := false
+htfBear := false
+htfSource := ""
+if htfZones.size() > 0
+    for [idx, hz] in htfZones
+        if hz.bias == 1 and low <= hz.zHigh and low >= hz.zLow
+            htfBull := true
+            htfSource := hz.source
+            break
+        if hz.bias == -1 and high >= hz.zLow and high <= hz.zHigh
+            htfBear := true
+            htfSource := hz.source
+            break
+
+
+// ──── Magnet Levels (HRS) ────────────────────────────────────────────────────
+type magnetLevel
+    float price
+    int   touchCount
+    int   firstBar
+    int   lastBar
+    int   htfAgreement = 1
+    bool  isMagnet = false
+
+var array<magnetLevel> hrs = array.new<magnetLevel>()
+addMagnet(float price) =>
+    if hrsTolATR > 0 and not na(price)
+        tol = atrVal * hrsTolATR
+        foundIdx = -1
+        if hrs.size() > 0
+            for i = 0 to hrs.size() - 1
+                ml = hrs.get(i)
+                if math.abs(ml.price - price) < tol
+                    foundIdx := i
+                    break
+        if foundIdx >= 0
+            ml2 = hrs.get(foundIdx)
+            ml2.touchCount += 1
+            ml2.lastBar := bar_index
+            0
+        else
+            hrs.unshift(magnetLevel.new(price, 1, bar_index, bar_index))
+            if hrs.size() > hrsMaxLev
+                hrs.pop()
+            0
+        0
+    0
+
+if obBullReact or fvgBullFill or htfBull
+    addMagnet(low)
+if obBearReact or fvgBearFill or htfBear
+    addMagnet(high)
+
+// Compute HTF agreement + mark magnets
+if hrs.size() > 0
+    for [idx, ml] in hrs
+        agree = 1
+        if htfZones.size() > 0
+            for [idx2, hz] in htfZones
+                hzMid = (hz.zHigh + hz.zLow) / 2
+                if math.abs(hzMid - ml.price) < atrVal * hrsTolATR
+                    agree += 1
+        if obs.size() > 0
+            for [idx3, ob] in obs
+                obMid = (ob.bHigh + ob.bLow) / 2
+                if math.abs(obMid - ml.price) < atrVal * hrsTolATR
+                    agree += 1
+                    break
+        ml.htfAgreement := agree
+        ml.isMagnet := agree >= magAgree
+
+var bool magBull = false, var bool magBear = false
+magBull := false
+magBear := false
+if hrs.size() > 0
+    for [idx, ml] in hrs
+        if ml.isMagnet
+            tol = atrVal * hrsTolATR
+            if low <= ml.price + tol and low >= ml.price - tol and close > ml.price
+                magBull := true
+                break
+            if high >= ml.price - tol and high <= ml.price + tol and close < ml.price
+                magBear := true
+                break
+
+
+// ──── OTE Zones ──────────────────────────────────────────────────────────────
+var float oteBullHi = na, var float oteBullLo = na, var float oteBearHi = na, var float oteBearLo = na
+var int oteBar = na, var int oteBias = 0
+isDispBull = body > avgBody10 * profDisplMult and cloc > 55 and close > open
+isDispBear = body > avgBody10 * profDisplMult and cloc < 45 and close < open
+anyBOSBull = intBOSBull or swingBOSBull
+anyBOSBear = intBOSBear or swingBOSBear
+
+if isDispBull and anyBOSBull
+    disLo = low[1] < low ? low[1] : math.min(low, nz(low[2], low))
+    oteBullHi := high - (high - disLo) * oteHi
+    oteBullLo := high - (high - disLo) * oteLo
+    oteBar := bar_index
+    oteBias := 1
+if isDispBear and anyBOSBear
+    disHi = high[1] > high ? high[1] : math.max(high, nz(high[2], high))
+    oteBearLo := low + (disHi - low) * oteHi
+    oteBearHi := low + (disHi - low) * oteLo
+    oteBar := bar_index
+    oteBias := -1
+
+oteActive = not na(oteBar) and (bar_index - oteBar) < oteWindow
+oteBullHit = oteActive and oteBias == 1 and not na(oteBullHi) and low <= oteBullHi and low >= oteBullLo
+oteBearHit = oteActive and oteBias == -1 and not na(oteBearHi) and high >= oteBearLo and high <= oteBearHi
+
+
+// ──── SMT Divergence (DXY for gold, ES for NQ, etc.) ─────────────────────────
+smtH = request.security(profCorr1, timeframe.period, high, lookahead=barmerge.lookahead_off)
+smtL = request.security(profCorr1, timeframe.period, low,  lookahead=barmerge.lookahead_off)
+goldRet = close != 0 and close[1] != 0 ? math.log(close / close[1]) : 0
+smtRet  = smtH != 0 and smtH[1] != 0 ? math.log(((smtH + smtL) / 2) / ((smtH[1] + smtL[1]) / 2)) : 0
+smtCorr = ta.correlation(goldRet, smtRet, 20)
+smtCorrValid = smtCorr < -0.2     // inversely correlated (e.g., gold vs DXY)
+gPH = ta.pivothigh(high, 8, 8)
+gPL = ta.pivotlow(low,   8, 8)
+currGoldPH = ta.valuewhen(not na(gPH), high[8], 0), prevGoldPH = ta.valuewhen(not na(gPH), high[8], 1)
+currSmtPH  = ta.valuewhen(not na(gPH), smtL[8], 0), prevSmtPH  = ta.valuewhen(not na(gPH), smtL[8], 1)
+currGoldPL = ta.valuewhen(not na(gPL), low[8],  0), prevGoldPL = ta.valuewhen(not na(gPL), low[8],  1)
+currSmtPL  = ta.valuewhen(not na(gPL), smtH[8], 0), prevSmtPL  = ta.valuewhen(not na(gPL), smtH[8], 1)
+var bool smtBull = false, var bool smtBear = false
+smtBull := false
+smtBear := false
+if not na(gPH) and not na(prevGoldPH) and not na(prevSmtPH) and smtCorrValid
+    if currGoldPH > prevGoldPH and currSmtPH >= prevSmtPH
+        smtBear := true
+if not na(gPL) and not na(prevGoldPL) and not na(prevSmtPL) and smtCorrValid
+    if currGoldPL < prevGoldPL and currSmtPL <= prevSmtPL
+        smtBull := true
+
+
+// ──── ARSI + Divergence ──────────────────────────────────────────────────────
+arsi = ta.rsi(close, 14)
+arsiMax = ta.highest(arsi, 43)
+arsiMin = ta.lowest(arsi, 43)
+arsiRng = arsiMax - arsiMin
+arsiOS_dyn = arsiMin + arsiRng * 0.10
+arsiOB_dyn = arsiMax - arsiRng * 0.10
+arsiBull = arsi > arsiOS_dyn and arsi - arsi[1] > 0
+arsiBear = arsi < arsiOB_dyn and arsi - arsi[1] < 0
+arsiRegime = arsi > arsiOB_dyn ? "OB" : arsi < arsiOS_dyn ? "OS" : "MID"
+
+dvPL = ta.pivotlow(low, 5, 5)
+dvPH = ta.pivothigh(high, 5, 5)
+divBull = not na(dvPL) and low[5] < ta.valuewhen(not na(dvPL), low[5], 1) and arsi[5] > ta.valuewhen(not na(dvPL), arsi[5], 1)
+divBear = not na(dvPH) and high[5] > ta.valuewhen(not na(dvPH), high[5], 1) and arsi[5] < ta.valuewhen(not na(dvPH), arsi[5], 1)
+
+
+// ──── Volume Intelligence + Order Flow ───────────────────────────────────────
+viBull = close > open and cloc > 70 and body > prng * 0.6
+viBear = close < open and cloc < 30 and body > prng * 0.6
+sHL = math.max(prng, syminfo.mintick)
+bPress = volume * (close - low) / sHL
+sPress = volume * (high - close) / sHL
+delta = bPress - sPress
+cumD14 = ta.sma(delta, 14)
+pressR = ta.sma((bPress + sPress) > 0 ? bPress / (bPress + sPress) * 100 : 50.0, 14)
+flowBull = pressR > 58 and cumD14 > 0 and volR >= 1.2
+flowBear = pressR < 42 and cumD14 < 0 and volR >= 1.2
+
+
+// ──── TD Sequential ──────────────────────────────────────────────────────────
+var int tdBuy  = 0
+var int tdSell = 0
+if not na(close[4])
+    if close < close[4]
+        tdBuy  := math.min(tdBuy + 1, tdThresh)
+        tdSell := 0
+    else if close > close[4]
+        tdSell := math.min(tdSell + 1, tdThresh)
+        tdBuy  := 0
+    else
+        tdBuy  := 0
+        tdSell := 0
+
+
+// ──── Bollinger Squeeze (BB inside Keltner) ──────────────────────────────────
+bbBasis2 = ta.sma(close, bbLen)
+bbDev2   = bbK * ta.stdev(close, bbLen)
+bbUpper  = bbBasis2 + bbDev2
+bbLower  = bbBasis2 - bbDev2
+keltBasis= ta.ema(close, keltLen)
+keltATR  = ta.atr(keltLen)
+keltUpper= keltBasis + keltK * keltATR
+keltLower= keltBasis - keltK * keltATR
+isSqueezed = bbUpper < keltUpper and bbLower > keltLower
+var bool prevSqueeze = false
+bbReleaseLong  = prevSqueeze and not isSqueezed and close > bbBasis2
+bbReleaseShort = prevSqueeze and not isSqueezed and close < bbBasis2
+prevSqueeze := isSqueezed
+
+
+// ──── VCP Pivot Breakout ─────────────────────────────────────────────────────
+priorPivot = ta.highest(high, vcpPivot)[1]
+avgVol20   = ta.sma(volume, 20)
+vcpBreakOK = not na(priorPivot) and close > priorPivot and volume > avgVol20 * vcpVolMult
+
+
+// ──── SMA Crossover ──────────────────────────────────────────────────────────
+fastSMA = ta.sma(close, smaFast)
+slowSMA = ta.sma(close, smaSlow)
+smaXoUp = ta.crossover(fastSMA, slowSMA)
+smaXoDn = ta.crossunder(fastSMA, slowSMA)
+
+
+// ──── RSI Mean Reversion ─────────────────────────────────────────────────────
+rsiVal = ta.rsi(close, rsiLen)
+rsiTrendSMA = ta.sma(close, rsiTrendL)
+rsiLongOK  = rsiVal < rsiOS and close > rsiTrendSMA
+rsiShortOK = rsiShort and rsiVal > rsiOB and close < rsiTrendSMA
+
+
+// ──── BOS Retest Tracking ────────────────────────────────────────────────────
+type retestZone
+    float level
+    int   bias
+    int   birthBar
+    bool  tested
+
+var array<retestZone> retests = array.new<retestZone>()
+if swingBOSBull
+    retests.unshift(retestZone.new(swingHi.currentLevel, 1, bar_index, false))
+if swingBOSBear
+    retests.unshift(retestZone.new(swingLo.currentLevel, -1, bar_index, false))
+if intBOSBull
+    retests.unshift(retestZone.new(intHi.currentLevel, 1, bar_index, false))
+if intBOSBear
+    retests.unshift(retestZone.new(intLo.currentLevel, -1, bar_index, false))
+if retests.size() > 20
+    while retests.size() > 15
+        retests.pop()
+
+var bool bosRetestBull = false, var bool bosRetestBear = false
+bosRetestBull := false
+bosRetestBear := false
+if retests.size() > 0
+    rTol = atrVal * retestTol
+    for [idx, rz] in retests
+        age = bar_index - rz.birthBar
+        if not rz.tested and age >= retestMin and age <= retestMax
+            if rz.bias == 1 and math.abs(low - rz.level) < rTol
+                bosRetestBull := true
+                rz.tested := true
+            else if rz.bias == -1 and math.abs(high - rz.level) < rTol
+                bosRetestBear := true
+                rz.tested := true
+
+
+// =============================================================================
+//  §4  STRATEGIES — 12 vote sources
+//      Each emits +1 LONG / -1 SHORT / 0 NONE.
+// =============================================================================
+
+// 1. SMA crossover
+sig_sma  = enSMA      and smaXoUp        ? 1 : enSMA      and smaXoDn        ? -1 : 0
+// 2. RSI mean reversion
+sig_rsi  = enRSI      and rsiLongOK      ? 1 : enRSI      and rsiShortOK     ? -1 : 0
+// 3. Bollinger squeeze release
+sig_bb   = enBB       and bbReleaseLong  ? 1 : enBB       and bbReleaseShort ? -1 : 0
+// 4. TD Sequential setup-9
+sig_td   = enTD       and tdBuy >= tdThresh ? 1 : enTD    and tdSell >= tdThresh ? -1 : 0
+// 5. VCP breakout (long only)
+sig_vcp  = (enVCP     and vcpBreakOK)    ? 1 : 0
+// 6. FVG fill (gap return)
+sig_fvg  = enFVGFill  and fvgBullFill    ? 1 : enFVGFill  and fvgBearFill    ? -1 : 0
+// 7. Sweep + zone (ICT)
+sig_swp  = enSwpZone  and swpBullValid and (obBullReact or fvgBullFill or htfBull) ? 1 : enSwpZone and swpBearValid and (obBearReact or fvgBearFill or htfBear) ? -1 : 0
+// 8. BOS retest
+sig_bos  = enBOSRet   and bosRetestBull  ? 1 : enBOSRet   and bosRetestBear  ? -1 : 0
+// 9. Magnet hit
+sig_mag  = enMagnet   and magBull        ? 1 : enMagnet   and magBear        ? -1 : 0
+// 10. HTF zone tap
+sig_htf  = enHTFZone  and htfBull        ? 1 : enHTFZone  and htfBear        ? -1 : 0
+// 11. OTE pullback
+sig_ote  = enOTE      and oteBullHit     ? 1 : enOTE      and oteBearHit     ? -1 : 0
+// 12. Order Block reaction
+sig_ob   = enOBRea    and obBullReact    ? 1 : enOBRea    and obBearReact    ? -1 : 0
+
+
+// =============================================================================
+//  §5  ENSEMBLE — vote tally + HP confluence + grade
+// =============================================================================
+
+longVotes  = (sig_sma > 0 ? 1 : 0) + (sig_rsi > 0 ? 1 : 0) + (sig_bb > 0 ? 1 : 0) +
+             (sig_td > 0 ? 1 : 0) + (sig_vcp > 0 ? 1 : 0) + (sig_fvg > 0 ? 1 : 0) +
+             (sig_swp > 0 ? 1 : 0) + (sig_bos > 0 ? 1 : 0) + (sig_mag > 0 ? 1 : 0) +
+             (sig_htf > 0 ? 1 : 0) + (sig_ote > 0 ? 1 : 0) + (sig_ob  > 0 ? 1 : 0)
+shortVotes = (sig_sma < 0 ? 1 : 0) + (sig_rsi < 0 ? 1 : 0) + (sig_bb < 0 ? 1 : 0) +
+             (sig_td < 0 ? 1 : 0) + (sig_vcp < 0 ? 1 : 0) + (sig_fvg < 0 ? 1 : 0) +
+             (sig_swp < 0 ? 1 : 0) + (sig_bos < 0 ? 1 : 0) + (sig_mag < 0 ? 1 : 0) +
+             (sig_htf < 0 ? 1 : 0) + (sig_ote < 0 ? 1 : 0) + (sig_ob  < 0 ? 1 : 0)
+
+ensembleLong  = useEnsemble ? (longVotes  >= minVotes and shortVotes < minVotes) : longVotes  >= 1
+ensembleShort = useEnsemble ? (shortVotes >= minVotes and longVotes  < minVotes) : shortVotes >= 1
+
+// HP confluence score (context-aware)
+hpBull = 0
+hpBull += sig_mag > 0 ? hp_magnet : 0
+hpBull += sig_swp > 0 ? hp_sweep  : 0
+hpBull += sig_htf > 0 ? hp_htf    : 0
+hpBull += sig_bos > 0 ? hp_bos    : 0
+hpBull += sig_ote > 0 ? hp_ote    : 0
+hpBull += sig_ob  > 0 ? hp_ob     : 0
+hpBull += divBull   ? hp_div    : 0
+hpBull += smtBull   ? hp_smt    : 0
+hpBull += (viBull and flowBull) ? hp_flow : 0
+hpBull += inSB              ? hp_sb     : 0
+hpBull += (pdPctClamp <= 15) ? hp_extPD : 0
+hpBull -= isChop          ? hp_pen_chop : 0
+hpBull -= adrExhausted    ? hp_pen_adr  : 0
+hpBull -= (combBias <= -biasWeak and combBias > -biasHardBlk) ? hp_pen_bias : 0
+
+hpBear = 0
+hpBear += sig_mag < 0 ? hp_magnet : 0
+hpBear += sig_swp < 0 ? hp_sweep  : 0
+hpBear += sig_htf < 0 ? hp_htf    : 0
+hpBear += sig_bos < 0 ? hp_bos    : 0
+hpBear += sig_ote < 0 ? hp_ote    : 0
+hpBear += sig_ob  < 0 ? hp_ob     : 0
+hpBear += divBear   ? hp_div    : 0
+hpBear += smtBear   ? hp_smt    : 0
+hpBear += (viBear and flowBear) ? hp_flow : 0
+hpBear += inSB              ? hp_sb     : 0
+hpBear += (pdPctClamp >= 85) ? hp_extPD : 0
+hpBear -= isChop          ? hp_pen_chop : 0
+hpBear -= adrExhausted    ? hp_pen_adr  : 0
+hpBear -= (combBias >=  biasWeak and combBias <  biasHardBlk) ? hp_pen_bias : 0
+
+gradeFor(int hp) =>
+    hp >= useGradeS_HP ? "S" : hp >= useGradeAp_HP ? "A+" : hp >= useGradeA_HP ? "A" : hp >= useGradeB_HP ? "B" : "C"
+
+gradeBull = gradeFor(hpBull)
+gradeBear = gradeFor(hpBear)
+gradePassBull = not useHPGate or gradeBull != "C"
+gradePassBear = not useHPGate or gradeBear != "C"
+
+
+// =============================================================================
+//  §6  GATES — bias / P/D / OB-guard / ADR / chop / session / cooldown
+// =============================================================================
+
+var int lastBuyBar = 0, var int lastSellBar = 0
+cdBuyOK  = (bar_index - lastBuyBar)  >= useCoolDn and (bar_index - lastSellBar) >= useCoolDn
+cdSellOK = (bar_index - lastSellBar) >= useCoolDn and (bar_index - lastBuyBar)  >= useCoolDn
+sessOK   = not sessGate or inActive
+pdGateBuy  = not usePDGate or pdPctClamp <= discMaxPct
+pdGateSell = not usePDGate or pdPctClamp >= premMinPct
+obGateBuy  = not useOBGuard or not nearSellOB
+obGateSell = not useOBGuard or not nearBuyOB
+adrGateBuy  = not useADR or not adrExhausted or close < nz(dayHi) - dayRange * 0.3
+adrGateSell = not useADR or not adrExhausted or close > nz(dayLo) + dayRange * 0.3
+
+
+// =============================================================================
+//  §7  ENTRY DECISION
+// =============================================================================
+
+confirmed = barstate.isconfirmed
+RAW_LONG  = ensembleLong  and gradePassBull
+RAW_SHORT = ensembleShort and gradePassBear
+BUY  = RAW_LONG  and biasAllowBuy  and sessOK and cdBuyOK  and pdGateBuy  and obGateBuy  and adrGateBuy  and not isChop and confirmed
+SELL = RAW_SHORT and biasAllowSell and sessOK and cdSellOK and pdGateSell and obGateSell and adrGateSell and not isChop and confirmed
+if BUY
+    lastBuyBar := bar_index
+if SELL
+    lastSellBar := bar_index
+
+// Identify the primary signal source for the trade label
+strongestBull() =>
+    if sig_mag  > 0
+        "MAGNET"
+    else if sig_swp  > 0
+        "SWEEP+ZONE"
+    else if sig_htf  > 0
+        "HTF ZONE"
+    else if sig_bos  > 0
+        "BOS RETEST"
+    else if sig_ote  > 0
+        "OTE"
+    else if sig_ob   > 0
+        "OB REACT"
+    else if sig_fvg  > 0
+        "FVG FILL"
+    else if sig_swp != 0
+        "SWEEP"
+    else if sig_vcp  > 0
+        "VCP"
+    else if sig_bb   > 0
+        "BB SQZ"
+    else if sig_td   > 0
+        "TD"
+    else if sig_rsi  > 0
+        "RSI"
+    else if sig_sma  > 0
+        "SMA"
+    else
+        "—"
+strongestBear() =>
+    if sig_mag  < 0
+        "MAGNET"
+    else if sig_swp  < 0
+        "SWEEP+ZONE"
+    else if sig_htf  < 0
+        "HTF ZONE"
+    else if sig_bos  < 0
+        "BOS RETEST"
+    else if sig_ote  < 0
+        "OTE"
+    else if sig_ob   < 0
+        "OB REACT"
+    else if sig_fvg  < 0
+        "FVG FILL"
+    else if sig_bb   < 0
+        "BB SQZ"
+    else if sig_td   < 0
+        "TD"
+    else if sig_rsi  < 0
+        "RSI"
+    else if sig_sma  < 0
+        "SMA"
+    else
+        "—"
+
+primaryBull = strongestBull()
+primaryBear = strongestBear()
+
+
+// =============================================================================
+//  §8  RISK — Fixed $ (gold) or ATR-stop + R-target + sizing
+// =============================================================================
+
+riskPerUnit = atrStopMult * atrVal
+riskAmount  = notionalEq * riskPctTrade
+sizeRisk    = riskPerUnit > 0 ? riskAmount / riskPerUnit : 0
+maxSize     = close > 0 ? (notionalEq * maxPosPct) / close : 0
+qtyOrder    = math.min(sizeRisk, maxSize)
+
+useFixed = useFixedSLTP and isGold
+longStop    = useFixed ? close - fixedSL : close - riskPerUnit
+shortStop   = useFixed ? close + fixedSL : close + riskPerUnit
+longTarget  = useFixed ? close + fixedTP : close + rMultiple * riskPerUnit
+shortTarget = useFixed ? close - fixedTP : close - rMultiple * riskPerUnit
+
+
+// =============================================================================
+//  §9  PERFORMANCE TRACKING — per-strategy WR + total $ P&L
+// =============================================================================
+
+// Per-strategy stats (12 strategies + ensemble = 13)
+var int wins_sma=0, var int loss_sma=0
+var int wins_rsi=0, var int loss_rsi=0
+var int wins_bb =0, var int loss_bb =0
+var int wins_td =0, var int loss_td =0
+var int wins_vcp=0, var int loss_vcp=0
+var int wins_fvg=0, var int loss_fvg=0
+var int wins_swp=0, var int loss_swp=0
+var int wins_bos=0, var int loss_bos=0
+var int wins_mag=0, var int loss_mag=0
+var int wins_htf=0, var int loss_htf=0
+var int wins_ote=0, var int loss_ote=0
+var int wins_ob =0, var int loss_ob =0
+var int wins_ens=0, var int loss_ens=0
+var float pnlTotal=0.0, var float winSum=0.0, var float lossSum=0.0
+var float activeEntry=na, var float activeStop=na, var float activeTarget=na
+var int activeBar=0, var int activeDir=0
+var array<bool> activeStrats = array.new<bool>(12, false)
+var bool activeIsEnsemble = false
+
+if BUY and na(activeEntry)
+    activeEntry := close
+    activeStop  := longStop
+    activeTarget:= longTarget
+    activeBar   := bar_index
+    activeDir   := 1
+    activeIsEnsemble := longVotes > 1
+    array.set(activeStrats, 0,  sig_sma > 0)
+    array.set(activeStrats, 1,  sig_rsi > 0)
+    array.set(activeStrats, 2,  sig_bb  > 0)
+    array.set(activeStrats, 3,  sig_td  > 0)
+    array.set(activeStrats, 4,  sig_vcp > 0)
+    array.set(activeStrats, 5,  sig_fvg > 0)
+    array.set(activeStrats, 6,  sig_swp > 0)
+    array.set(activeStrats, 7,  sig_bos > 0)
+    array.set(activeStrats, 8,  sig_mag > 0)
+    array.set(activeStrats, 9,  sig_htf > 0)
+    array.set(activeStrats, 10, sig_ote > 0)
+    array.set(activeStrats, 11, sig_ob  > 0)
+if SELL and na(activeEntry)
+    activeEntry := close
+    activeStop  := shortStop
+    activeTarget:= shortTarget
+    activeBar   := bar_index
+    activeDir   := -1
+    activeIsEnsemble := shortVotes > 1
+    array.set(activeStrats, 0,  sig_sma < 0)
+    array.set(activeStrats, 1,  sig_rsi < 0)
+    array.set(activeStrats, 2,  sig_bb  < 0)
+    array.set(activeStrats, 3,  sig_td  < 0)
+    array.set(activeStrats, 4,  sig_vcp < 0)
+    array.set(activeStrats, 5,  sig_fvg < 0)
+    array.set(activeStrats, 6,  sig_swp < 0)
+    array.set(activeStrats, 7,  sig_bos < 0)
+    array.set(activeStrats, 8,  sig_mag < 0)
+    array.set(activeStrats, 9,  sig_htf < 0)
+    array.set(activeStrats, 10, sig_ote < 0)
+    array.set(activeStrats, 11, sig_ob  < 0)
+
+if not na(activeEntry)
+    won = activeDir == 1 and high >= activeTarget or activeDir == -1 and low <= activeTarget
+    lost= activeDir == 1 and low  <= activeStop   or activeDir == -1 and high>= activeStop
+    stale= (bar_index - activeBar) > 50
+    if won or lost
+        pnl = won ? (activeDir == 1 ? activeTarget - activeEntry : activeEntry - activeTarget) : (activeDir == 1 ? activeStop - activeEntry : activeEntry - activeStop)
+        pnlTotal += pnl
+        if won
+            winSum += pnl
+        else
+            lossSum += math.abs(pnl)
+        // Attribute to every strategy that contributed
+        if array.get(activeStrats, 0)
+            if won
+                wins_sma += 1
+            else
+                loss_sma += 1
+        if array.get(activeStrats, 1)
+            if won
+                wins_rsi += 1
+            else
+                loss_rsi += 1
+        if array.get(activeStrats, 2)
+            if won
+                wins_bb += 1
+            else
+                loss_bb += 1
+        if array.get(activeStrats, 3)
+            if won
+                wins_td += 1
+            else
+                loss_td += 1
+        if array.get(activeStrats, 4)
+            if won
+                wins_vcp += 1
+            else
+                loss_vcp += 1
+        if array.get(activeStrats, 5)
+            if won
+                wins_fvg += 1
+            else
+                loss_fvg += 1
+        if array.get(activeStrats, 6)
+            if won
+                wins_swp += 1
+            else
+                loss_swp += 1
+        if array.get(activeStrats, 7)
+            if won
+                wins_bos += 1
+            else
+                loss_bos += 1
+        if array.get(activeStrats, 8)
+            if won
+                wins_mag += 1
+            else
+                loss_mag += 1
+        if array.get(activeStrats, 9)
+            if won
+                wins_htf += 1
+            else
+                loss_htf += 1
+        if array.get(activeStrats, 10)
+            if won
+                wins_ote += 1
+            else
+                loss_ote += 1
+        if array.get(activeStrats, 11)
+            if won
+                wins_ob += 1
+            else
+                loss_ob += 1
+        if activeIsEnsemble
+            if won
+                wins_ens += 1
+            else
+                loss_ens += 1
+        activeEntry := na
+    else if stale
+        activeEntry := na
+
+
+// =============================================================================
+//  §10  PLOTS — overlays + per-strategy dots + ensemble triangles + S/T lines
+// =============================================================================
+
+plot(showOverlays ? fastSMA : na, "SMA fast", color = color.new(color.blue, 0),   linewidth = 1)
+plot(showOverlays ? slowSMA : na, "SMA slow", color = color.new(color.orange, 0), linewidth = 1)
+plot(showOverlays ? bbBasis2: na, "BB basis", color = color.new(color.purple, 60),linewidth = 1)
+plot(showOverlays ? bbUpper : na, "BB upper", color = color.new(color.purple, 40),linewidth = 1)
+plot(showOverlays ? bbLower : na, "BB lower", color = color.new(color.purple, 40),linewidth = 1)
+bgcolor(isSqueezed ? color.new(color.aqua, 90) : na, title = "Squeeze background")
+
+// Per-strategy diagnostic dots
+plotchar(showStratDots and sig_sma > 0,  "sma L",  "·", location.belowbar, color.new(color.blue,    20), size = size.tiny)
+plotchar(showStratDots and sig_sma < 0,  "sma S",  "·", location.abovebar, color.new(color.blue,    20), size = size.tiny)
+plotchar(showStratDots and sig_rsi > 0,  "rsi L",  "·", location.belowbar, color.new(color.lime,    20), size = size.tiny)
+plotchar(showStratDots and sig_rsi < 0,  "rsi S",  "·", location.abovebar, color.new(color.lime,    20), size = size.tiny)
+plotchar(showStratDots and sig_bb  > 0,  "bb L",   "·", location.belowbar, color.new(color.purple,  20), size = size.tiny)
+plotchar(showStratDots and sig_bb  < 0,  "bb S",   "·", location.abovebar, color.new(color.purple,  20), size = size.tiny)
+plotchar(showStratDots and sig_td  > 0,  "td L",   "·", location.belowbar, color.new(color.yellow,  20), size = size.tiny)
+plotchar(showStratDots and sig_td  < 0,  "td S",   "·", location.abovebar, color.new(color.yellow,  20), size = size.tiny)
+plotchar(showStratDots and sig_vcp > 0,  "vcp L",  "·", location.belowbar, color.new(color.fuchsia, 20), size = size.tiny)
+plotchar(showStratDots and sig_fvg > 0,  "fvg L",  "·", location.belowbar, color.new(color.silver,  20), size = size.tiny)
+plotchar(showStratDots and sig_fvg < 0,  "fvg S",  "·", location.abovebar, color.new(color.silver,  20), size = size.tiny)
+plotchar(showStratDots and sig_swp > 0,  "swp L",  "▲", location.belowbar, color.new(color.aqua,    20), size = size.tiny)
+plotchar(showStratDots and sig_swp < 0,  "swp S",  "▼", location.abovebar, color.new(color.aqua,    20), size = size.tiny)
+plotchar(showStratDots and sig_bos > 0,  "bos L",  "·", location.belowbar, color.new(color.teal,    20), size = size.tiny)
+plotchar(showStratDots and sig_bos < 0,  "bos S",  "·", location.abovebar, color.new(color.teal,    20), size = size.tiny)
+plotchar(showStratDots and sig_mag > 0,  "mag L",  "★", location.belowbar, color.new(#FFD700,       20), size = size.small)
+plotchar(showStratDots and sig_mag < 0,  "mag S",  "★", location.abovebar, color.new(#FFD700,       20), size = size.small)
+plotchar(showStratDots and sig_htf > 0,  "htf L",  "·", location.belowbar, color.new(color.green,   20), size = size.tiny)
+plotchar(showStratDots and sig_htf < 0,  "htf S",  "·", location.abovebar, color.new(color.red,     20), size = size.tiny)
+plotchar(showStratDots and sig_ote > 0,  "ote L",  "·", location.belowbar, color.new(#00E5FF,       20), size = size.tiny)
+plotchar(showStratDots and sig_ote < 0,  "ote S",  "·", location.abovebar, color.new(#00E5FF,       20), size = size.tiny)
+plotchar(showStratDots and sig_ob  > 0,  "ob L",   "·", location.belowbar, color.new(color.maroon,  20), size = size.tiny)
+plotchar(showStratDots and sig_ob  < 0,  "ob S",   "·", location.abovebar, color.new(color.maroon,  20), size = size.tiny)
+
+// Big ensemble entry triangles
+plotshape(BUY,  "BUY ★",  shape.triangleup,   location.belowbar, color.new(color.green, 0), size = size.normal, text = "★")
+plotshape(SELL, "SELL ★", shape.triangledown, location.abovebar, color.new(color.red,   0), size = size.normal, text = "★")
+
+// Stop / target lines for current trade
+plot(showStops and not na(activeEntry) and activeDir ==  1 ? activeStop   : na, "L stop",   color = color.new(color.red,   0), style = plot.style_linebr, linewidth = 2)
+plot(showStops and not na(activeEntry) and activeDir ==  1 ? activeTarget : na, "L target", color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 2)
+plot(showStops and not na(activeEntry) and activeDir == -1 ? activeStop   : na, "S stop",   color = color.new(color.red,   0), style = plot.style_linebr, linewidth = 2)
+plot(showStops and not na(activeEntry) and activeDir == -1 ? activeTarget : na, "S target", color = color.new(color.green, 0), style = plot.style_linebr, linewidth = 2)
+
+// Draw OBs
+var array<box> obBoxes = array.new<box>()
+if showOBs and barstate.islast
+    for bx in obBoxes
+        box.delete(bx)
+    obBoxes.clear()
+    if obs.size() > 0
+        cap = math.min(obs.size(), 10)
+        for i = 0 to cap - 1
+            ob = obs.get(i)
+            c = ob.bias == 1 ? color.new(color.blue, 80) : color.new(color.maroon, 80)
+            obBoxes.push(box.new(ob.bTime, ob.bHigh, last_bar_time, ob.bLow, xloc=xloc.bar_time, bgcolor=c, border_color=c, extend=extend.right))
+
+// Draw FVGs
+var array<box> fvgBoxes = array.new<box>()
+if showFVGs and barstate.islast
+    for bx in fvgBoxes
+        box.delete(bx)
+    fvgBoxes.clear()
+    if fvgs.size() > 0
+        cap = math.min(fvgs.size(), 15)
+        for i = 0 to cap - 1
+            g = fvgs.get(i)
+            c = g.isBull ? color.new(#00ff68, 80) : color.new(#ff0008, 80)
+            fvgBoxes.push(box.new(g.bornBar - 2, g.top, bar_index + 30, g.bottom, bgcolor=c, border_color=c))
+
+// Draw Magnets
+var array<line>  magLines  = array.new<line>()
+var array<label> magLabels = array.new<label>()
+if showMagnets and barstate.islast
+    for ln in magLines
+        line.delete(ln)
+    for lb in magLabels
+        label.delete(lb)
+    magLines.clear()
+    magLabels.clear()
+    if hrs.size() > 0
+        drawn = 0
+        for [idx, ml] in hrs
+            if ml.isMagnet and drawn < 6
+                magLines.push(line.new(ml.firstBar, ml.price, bar_index + 30, ml.price, color = color.new(#FFD700, 10), width = 3, style = line.style_solid))
+                magLabels.push(label.new(bar_index + 31, ml.price, "★ MAGNET ×" + str.tostring(ml.touchCount) + " (" + str.tostring(ml.htfAgreement) + "TF)", color = color(na), textcolor = #FFD700, style = label.style_label_left, size = size.small))
+                drawn += 1
+
+// Draw HTF Zones
+var array<line>  htfLines  = array.new<line>()
+var array<label> htfLabels = array.new<label>()
+if showHTFZones and barstate.islast
+    for ln in htfLines
+        line.delete(ln)
+    for lb in htfLabels
+        label.delete(lb)
+    htfLines.clear()
+    htfLabels.clear()
+    if htfZones.size() > 0
+        drawn2 = 0
+        for [idx, hz] in htfZones
+            if drawn2 < 8
+                mid = (hz.zHigh + hz.zLow) / 2
+                c = hz.bias == 1 ? color.new(color.green, 40) : color.new(color.red, 40)
+                htfLines.push(line.new(hz.birthBar, mid, bar_index + 30, mid, color = c, style = line.style_dashed, width = 1))
+                htfLabels.push(label.new(bar_index + 31, mid, hz.source, color = color(na), textcolor = c, style = label.style_label_left, size = size.tiny))
+                drawn2 += 1
+
+// Draw Liquidity Pools
+var array<line>  liqLines  = array.new<line>()
+var array<label> liqLabels = array.new<label>()
+if showLiquidity and barstate.islast
+    for ln in liqLines
+        line.delete(ln)
+    for lb in liqLabels
+        label.delete(lb)
+    liqLines.clear()
+    liqLabels.clear()
+    drawn3 = 0
+    if liqs.size() > 0
+        for [idx, p] in liqs
+            if not p.swept and drawn3 < 8
+                c = p.isHigh ? color.new(#00E5FF, 60) : color.new(#FF6D00, 60)
+                liqLines.push(line.new(p.firstBar, p.level, bar_index + 30, p.level, color = c, style = line.style_dotted, width = math.min(p.touches, 4)))
+                liqLabels.push(label.new(bar_index + 31, p.level, (p.isHigh ? "BSL" : "SSL") + " ×" + str.tostring(p.touches), color = color(na), textcolor = c, style = label.style_label_left, size = size.tiny))
+                drawn3 += 1
+
+
+// =============================================================================
+//  §11  DASHBOARD — everything visible
+// =============================================================================
+
+dashPosResolve() =>
+    switch dashPos
+        "top_right"     => position.top_right
+        "top_left"      => position.top_left
+        "bottom_right"  => position.bottom_right
+        "bottom_left"   => position.bottom_left
+        "middle_right"  => position.middle_right
+        "middle_left"   => position.middle_left
+        =>                position.top_right
+
+var table dash = table.new(dashPosResolve(), 4, 28, border_width = 1, border_color = color.new(color.gray, 60))
+
+pillColor(bool active, bool isLong) =>
+    active ? (isLong ? color.new(color.green, 0) : color.new(color.red, 0)) : color.new(color.gray, 70)
+
+stratWR(int w, int l) =>
+    n = w + l
+    n > 0 ? str.tostring(math.round(w * 100.0 / n)) + "%" : "—"
+
+// Strategy-row drawer — must be at top level (Pine doesn't allow function defs inside `if`).
+rowS(int row, string name, int sig, int w, int l, bool enabled) =>
+    sigTxt = sig > 0 ? "L" : sig < 0 ? "S" : "—"
+    sigBg  = sig > 0 ? color.new(color.green, 0) : sig < 0 ? color.new(color.red, 0) : color.new(color.gray, 70)
+    nameCol = enabled ? color.white : color.new(color.gray, 30)
+    table.cell(dash, 0, row, name, bgcolor=enabled ? na : color.new(color.gray, 70), text_color=nameCol, text_size=size.tiny)
+    table.cell(dash, 1, row, sigTxt, bgcolor=sigBg, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, row, stratWR(w, l), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, row, str.tostring(w) + "/" + str.tostring(w + l), text_color=color.white, text_size=size.tiny)
+
+if showDash and barstate.islast
+    // Header
+    table.cell(dash, 0, 0, "APEX FLOW v1.0", bgcolor=color.new(#1A237E, 0), text_color=color.white, text_size=size.normal)
+    table.cell(dash, 1, 0, syminfo.ticker,    bgcolor=color.new(#1A237E, 0), text_color=color.white)
+    table.cell(dash, 2, 0, profName,           bgcolor=color.new(#1A237E, 0), text_color=color.white)
+    table.cell(dash, 3, 0, timeframe.period,  bgcolor=color.new(#1A237E, 0), text_color=color.white)
+
+    // CONTEXT row
+    biasC = biasBull ? color.new(color.green, 30) : biasBear ? color.new(color.red, 30) : color.new(color.gray, 50)
+    table.cell(dash, 0, 1, "BIAS", bgcolor=biasC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 1, biasTxt, bgcolor=biasC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 1, str.tostring(combBias), bgcolor=biasC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 1, biasMode, bgcolor=biasC, text_color=color.white, text_size=size.tiny)
+
+    pdC = inDisc and pdPctClamp <= discMaxPct ? color.new(color.green, 30) : inPrem and pdPctClamp >= premMinPct ? color.new(color.red, 30) : color.new(color.gray, 60)
+    table.cell(dash, 0, 2, "P/D", bgcolor=pdC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 2, str.tostring(math.round(pdPctClamp)) + "%", bgcolor=pdC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 2, inDisc ? "DISC" : inPrem ? "PREM" : "EQ", bgcolor=pdC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 2, pdPctClamp >= 90 ? "EXT↑" : pdPctClamp <= 10 ? "EXT↓" : "—", bgcolor=pdC, text_color=color.white, text_size=size.tiny)
+
+    regC = isChop ? color.new(color.orange, 30) : isTrend ? color.new(color.green, 30) : color.new(color.gray, 60)
+    table.cell(dash, 0, 3, "REGIME", bgcolor=regC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 3, regTxt, bgcolor=regC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 3, "ADX:" + str.tostring(adx, "#"), bgcolor=regC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 3, isSqueezed ? "SQZ" : volR >= 1.5 ? "VOL↑" : "—", bgcolor=regC, text_color=color.white, text_size=size.tiny)
+
+    adrC = adrExhausted ? color.new(color.red, 30) : adrPct >= 65 ? color.new(color.orange, 40) : color.new(color.gray, 60)
+    table.cell(dash, 0, 4, "ADR", bgcolor=adrC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 4, str.tostring(math.round(adrPct)) + "%", bgcolor=adrC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 4, adrTxt, bgcolor=adrC, text_color=color.white, text_size=size.tiny)
+    sessName = inSB ? "★ Silver Bullet" : inTK ? "TOKYO" : inLN and inNY ? "LDN+NY" : inLN ? "LONDON" : inNY ? "NY" : "OFF"
+    table.cell(dash, 3, 4, sessName, bgcolor=adrC, text_color=color.white, text_size=size.tiny)
+
+    // Strategy votes header
+    table.cell(dash, 0, 5, "STRATEGY", bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 5, "VOTE",     bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 5, "WR",       bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 5, "W/L",      bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
+
+    rowS(6,  "1 SMA cross",    sig_sma, wins_sma, loss_sma, enSMA)
+    rowS(7,  "2 RSI MR",       sig_rsi, wins_rsi, loss_rsi, enRSI)
+    rowS(8,  "3 BB Squeeze",   sig_bb,  wins_bb,  loss_bb,  enBB)
+    rowS(9,  "4 TD Sequential",sig_td,  wins_td,  loss_td,  enTD)
+    rowS(10, "5 VCP",          sig_vcp, wins_vcp, loss_vcp, enVCP)
+    rowS(11, "6 FVG Fill",     sig_fvg, wins_fvg, loss_fvg, enFVGFill)
+    rowS(12, "7 Sweep+Zone",   sig_swp, wins_swp, loss_swp, enSwpZone)
+    rowS(13, "8 BOS Retest",   sig_bos, wins_bos, loss_bos, enBOSRet)
+    rowS(14, "9 ★ Magnet",     sig_mag, wins_mag, loss_mag, enMagnet)
+    rowS(15, "10 HTF Zone",    sig_htf, wins_htf, loss_htf, enHTFZone)
+    rowS(16, "11 OTE",         sig_ote, wins_ote, loss_ote, enOTE)
+    rowS(17, "12 OB React",    sig_ob,  wins_ob,  loss_ob,  enOBRea)
+
+    // Ensemble verdict
+    verdict = BUY ? "LONG ★" : SELL ? "SHORT ★" : "—"
+    vColor  = BUY ? color.new(color.green, 0) : SELL ? color.new(color.red, 0) : color.new(color.gray, 60)
+    table.cell(dash, 0, 18, "ENSEMBLE",       bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 18, "L:" + str.tostring(longVotes) + " S:" + str.tostring(shortVotes), bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 18, "HP B:" + str.tostring(hpBull) + " S:" + str.tostring(hpBear), bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 18, "Grade " + (BUY ? gradeBull : SELL ? gradeBear : "—"), bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
+
+    table.cell(dash, 0, 19, "VERDICT", bgcolor=vColor, text_color=color.white, text_size=size.small)
+    table.cell(dash, 1, 19, verdict,   bgcolor=vColor, text_color=color.white, text_size=size.small)
+    primaryTxt = BUY ? primaryBull : SELL ? primaryBear : "—"
+    table.cell(dash, 2, 19, primaryTxt, bgcolor=vColor, text_color=color.white, text_size=size.tiny)
+    qtyTxt = (BUY or SELL) ? str.tostring(qtyOrder, "#.##") + " sh" : "—"
+    table.cell(dash, 3, 19, qtyTxt, bgcolor=vColor, text_color=color.white, text_size=size.tiny)
+
+    // Performance section
+    nTotal = wins_sma + wins_rsi + wins_bb + wins_td + wins_vcp + wins_fvg + wins_swp + wins_bos + wins_mag + wins_htf + wins_ote + wins_ob + loss_sma + loss_rsi + loss_bb + loss_td + loss_vcp + loss_fvg + loss_swp + loss_bos + loss_mag + loss_htf + loss_ote + loss_ob
+    wTotal = wins_sma + wins_rsi + wins_bb + wins_td + wins_vcp + wins_fvg + wins_swp + wins_bos + wins_mag + wins_htf + wins_ote + wins_ob
+    wrPct  = nTotal > 0 ? wTotal * 100.0 / nTotal : 0
+    pf     = lossSum > 0 ? winSum / lossSum : 0
+    pnlC   = pnlTotal >= 0 ? color.new(color.green, 30) : color.new(color.red, 30)
+    table.cell(dash, 0, 20, "P&L", bgcolor=pnlC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 20, (pnlTotal >= 0 ? "+" : "") + str.tostring(pnlTotal, "#.##"), bgcolor=pnlC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 20, str.tostring(math.round(wrPct)) + "%", bgcolor=pnlC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 20, "PF " + str.tostring(pf, "#.##"), bgcolor=pnlC, text_color=color.white, text_size=size.tiny)
+
+    // Gate status
+    gateOK = biasAllowBuy or biasAllowSell
+    gateC  = gateOK ? color.new(color.green, 50) : color.new(color.red, 30)
+    table.cell(dash, 0, 21, "GATES",  bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 21, "Bias",   bgcolor=gateC, text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 21, "P/D",    bgcolor=(pdGateBuy or pdGateSell) ? color.new(color.green, 50) : color.new(color.red, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 21, "OB",     bgcolor=(obGateBuy and obGateSell) ? color.new(color.green, 50) : color.new(color.red, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 0, 22, "GATES2", bgcolor=color.new(color.gray, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 1, 22, "ADR",    bgcolor=(adrGateBuy and adrGateSell) ? color.new(color.green, 50) : color.new(color.red, 30), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 2, 22, "Chop",   bgcolor=isChop ? color.new(color.red, 30) : color.new(color.green, 50), text_color=color.white, text_size=size.tiny)
+    table.cell(dash, 3, 22, "Sess",   bgcolor=sessOK ? color.new(color.green, 50) : color.new(color.red, 30), text_color=color.white, text_size=size.tiny)
+
+    // Active position
+    table.cell(dash, 0, 23, "ACTIVE", bgcolor=color.new(#1A237E, 20), text_color=color.white, text_size=size.tiny)
+    if not na(activeEntry)
+        sideTxt = activeDir == 1 ? "LONG" : "SHORT"
+        upl = activeDir == 1 ? close - activeEntry : activeEntry - close
+        uplC = upl >= 0 ? color.new(color.green, 30) : color.new(color.red, 30)
+        table.cell(dash, 1, 23, sideTxt + " @ " + str.tostring(activeEntry, "#.##"), bgcolor=uplC, text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 2, 23, "SL " + str.tostring(activeStop, "#.##"), text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 3, 23, "TP " + str.tostring(activeTarget, "#.##"), text_color=color.white, text_size=size.tiny)
+    else
+        table.cell(dash, 1, 23, "—", text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 2, 23, "—", text_color=color.white, text_size=size.tiny)
+        table.cell(dash, 3, 23, "—", text_color=color.white, text_size=size.tiny)
+
+
+// =============================================================================
+//  §12  ALERTS
+// =============================================================================
+
+alertcondition(BUY,                                     title = "APEX BUY",         message = "{{ticker}} {{interval}} APEX BUY  grade={{plot(\"BB basis\")}} close={{close}}")
+alertcondition(SELL,                                    title = "APEX SELL",        message = "{{ticker}} {{interval}} APEX SELL grade close={{close}}")
+alertcondition(magBull,                                 title = "★ MAGNET hit BULL",message = "{{ticker}} ★ MAGNET bullish reaction")
+alertcondition(magBear,                                 title = "★ MAGNET hit BEAR",message = "{{ticker}} ★ MAGNET bearish reaction")
+alertcondition(swpBullValid,                            title = "Sweep + bull rej", message = "{{ticker}} Sweep + bullish rejection")
+alertcondition(swpBearValid,                            title = "Sweep + bear rej", message = "{{ticker}} Sweep + bearish rejection")
+alertcondition(bosRetestBull,                           title = "BOS retest BULL",  message = "{{ticker}} BOS retest bullish")
+alertcondition(bosRetestBear,                           title = "BOS retest BEAR",  message = "{{ticker}} BOS retest bearish")
+alertcondition(htfBull,                                 title = "HTF zone tap BULL",message = "{{ticker}} HTF zone bullish reaction")
+alertcondition(htfBear,                                 title = "HTF zone tap BEAR",message = "{{ticker}} HTF zone bearish reaction")
+alertcondition(isSqueezed and not isSqueezed[1],        title = "BB squeeze ON",    message = "{{ticker}} Bollinger Bands compressed inside Keltner")
+alertcondition(not isSqueezed and isSqueezed[1],        title = "BB squeeze OFF",   message = "{{ticker}} Squeeze released")

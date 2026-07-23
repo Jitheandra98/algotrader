@@ -1,0 +1,71 @@
+{
+  "title": "algotrader — risk",
+  "uid": "algotrader-risk",
+  "schemaVersion": 38,
+  "tags": ["algotrader"],
+  "timezone": "browser",
+  "time": {"from": "now-24h", "to": "now"},
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Kill switch",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "algotrader_kill_switch_tripped", "refId": "A"}],
+      "fieldConfig": {"defaults": {"thresholds": {"mode": "absolute", "steps": [{"color": "green", "value": null}, {"color": "red", "value": 1}]}}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Drawdown %",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "algotrader_drawdown_pct", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "percent"}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Realized P&L (daily)",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "algotrader_realized_pnl_daily_usd", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Unrealized P&L",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "algotrader_unrealized_pnl_usd", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Risk rejections by limit",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [{"expr": "sum by (limit) (rate(algotrader_risk_rejections_total[5m])) * 300", "legendFormat": "{{limit}}", "refId": "A"}]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Order rejections by reason",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [{"expr": "sum by (reason) (rate(algotrader_orders_rejected_total[5m])) * 300", "legendFormat": "{{reason}}", "refId": "A"}]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Data feed lag (seconds)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "targets": [{"expr": "algotrader_data_lag_seconds", "legendFormat": "{{stream}}", "refId": "A"}]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Health checks (1 = healthy)",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "targets": [{"expr": "algotrader_health_status", "legendFormat": "{{check}}", "refId": "A"}]
+    }
+  ]
+}

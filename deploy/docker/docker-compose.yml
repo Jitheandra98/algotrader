@@ -1,0 +1,61 @@
+name: algotrader-dev
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: algotrader-redis
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: algotrader-timescaledb
+    environment:
+      POSTGRES_USER: algotrader
+      POSTGRES_PASSWORD: algotrader
+      POSTGRES_DB: algotrader
+      TIMESCALEDB_TELEMETRY: "off"
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+      # Bind-mount initial migration so a fresh container is ready to use.
+      - ../../persistence/migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U algotrader -d algotrader"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Optional: Grafana for ad-hoc inspection of TimescaleDB. M8 will define
+  # provisioned dashboards; M1 just exposes the service.
+  grafana:
+    image: grafana/grafana:latest
+    container_name: algotrader-grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_SECURITY_ADMIN_PASSWORD: "admin"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  redis-data:
+  timescaledb-data:
+  grafana-data:

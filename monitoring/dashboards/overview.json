@@ -1,0 +1,91 @@
+{
+  "title": "algotrader — overview",
+  "uid": "algotrader-overview",
+  "schemaVersion": 38,
+  "tags": ["algotrader"],
+  "timezone": "browser",
+  "time": {"from": "now-6h", "to": "now"},
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Equity",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [{"expr": "algotrader_equity_usd", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Cash",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [{"expr": "algotrader_cash_usd", "refId": "A"}],
+      "fieldConfig": {"defaults": {"unit": "currencyUSD"}}
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Open positions",
+      "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0},
+      "targets": [{"expr": "algotrader_open_position_count", "refId": "A"}]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Kill switch",
+      "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0},
+      "targets": [{"expr": "algotrader_kill_switch_tripped", "refId": "A"}],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {"mode": "absolute", "steps": [
+            {"color": "green", "value": null},
+            {"color": "red", "value": 1}
+          ]}
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Equity over time",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [{"expr": "algotrader_equity_usd", "refId": "A", "legendFormat": "equity"}]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Drawdown %",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [{"expr": "algotrader_drawdown_pct", "refId": "A", "legendFormat": "dd %"}]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Signals / 5 min by strategy",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12},
+      "targets": [{"expr": "sum by (strategy) (rate(algotrader_signals_emitted_total[5m])) * 300", "legendFormat": "{{strategy}}", "refId": "A"}]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Fills / 5 min by strategy",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12},
+      "targets": [{"expr": "sum by (strategy) (rate(algotrader_fills_total[5m])) * 300", "legendFormat": "{{strategy}}", "refId": "A"}]
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Fill latency p95 (ms)",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20},
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (broker, le) (rate(algotrader_fill_latency_ms_bucket[5m])))", "legendFormat": "{{broker}}", "refId": "A"}]
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Health checks",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20},
+      "targets": [{"expr": "algotrader_health_status", "legendFormat": "{{check}}", "refId": "A"}]
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+# Developer environment — uses local docker-compose services.
+env: dev
+
+logging:
+  level: DEBUG
+  format: console
+
+strategies:
+  # Example shape. Real strategies are added in M5.
+  - name: example_ma_crossover
+    enabled: false
+    live: false           # never true outside a deliberate audit
+    timeframe: 5m
+    instruments: ["SPY", "QQQ"]
+    params:
+      fast_period: 9
+      slow_period: 21

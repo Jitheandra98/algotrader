@@ -1,0 +1,45 @@
+{
+  "title": "algotrader — per-strategy",
+  "uid": "algotrader-strategy",
+  "schemaVersion": 38,
+  "tags": ["algotrader"],
+  "timezone": "browser",
+  "time": {"from": "now-24h", "to": "now"},
+  "refresh": "30s",
+  "templating": {
+    "list": [
+      {
+        "name": "strategy",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(algotrader_signals_emitted_total, strategy)",
+        "refresh": 1,
+        "includeAll": true,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Signals / 5min — $strategy",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "targets": [{"expr": "sum by (direction) (rate(algotrader_signals_emitted_total{strategy=~\"$strategy\"}[5m])) * 300", "legendFormat": "{{direction}}", "refId": "A"}]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Risk rejections by limit — $strategy",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "targets": [{"expr": "sum by (limit) (rate(algotrader_risk_rejections_total{strategy=~\"$strategy\"}[5m])) * 300", "legendFormat": "{{limit}}", "refId": "A"}]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Slippage per unit (signed) — $strategy",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 8},
+      "targets": [{"expr": "histogram_quantile(0.5, sum by (le) (rate(algotrader_slippage_per_unit_bucket{strategy=~\"$strategy\"}[5m])))", "legendFormat": "p50", "refId": "A"}, {"expr": "histogram_quantile(0.95, sum by (le) (rate(algotrader_slippage_per_unit_bucket{strategy=~\"$strategy\"}[5m])))", "legendFormat": "p95", "refId": "B"}]
+    }
+  ]
+}

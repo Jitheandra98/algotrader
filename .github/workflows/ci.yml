@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  quality:
+    name: Lint / Format / Type
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: |
+          pipx install poetry==1.8.2
+
+      - name: Cache virtualenv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock', 'pyproject.toml') }}
+
+      - name: Install deps
+        working-directory: algotrader
+        run: poetry install --with dev --no-interaction
+
+      - name: ruff
+        working-directory: algotrader
+        run: poetry run ruff check .
+
+      - name: black --check
+        working-directory: algotrader
+        run: poetry run black --check .
+
+      - name: mypy
+        working-directory: algotrader
+        run: poetry run mypy core data features strategies risk execution monitoring persistence backtest
+
+  test-unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry==1.8.2
+
+      - name: Cache virtualenv
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pypoetry
+          key: poetry-${{ runner.os }}-${{ hashFiles('poetry.lock', 'pyproject.toml') }}
+
+      - name: Install deps
+        working-directory: algotrader
+        run: poetry install --with dev --no-interaction
+
+      - name: pytest (unit, excluding integration)
+        working-directory: algotrader
+        run: poetry run pytest tests/unit -m "not integration" --cov --cov-report=xml
+
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: algotrader/coverage.xml
+
+  test-integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+      timescaledb:
+        image: timescale/timescaledb:latest-pg16
+        env:
+          POSTGRES_USER: algotrader
+          POSTGRES_PASSWORD: algotrader
+          POSTGRES_DB: algotrader
+          TIMESCALEDB_TELEMETRY: "off"
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U algotrader -d algotrader"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry==1.8.2
+
+      - name: Install deps
+        working-directory: algotrader
+        run: poetry install --with dev --no-interaction
+
+      - name: Apply migrations
+        working-directory: algotrader
+        env:
+          PGPASSWORD: algotrader
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+          psql -h localhost -U algotrader -d algotrader -f persistence/migrations/001_initial.sql
+
+      - name: pytest (integration)
+        working-directory: algotrader
+        env:
+          REDIS_URL: redis://localhost:6379/0
+          DATABASE_URL: postgresql://algotrader:algotrader@localhost:5432/algotrader
+        run: poetry run pytest tests/integration -m integration

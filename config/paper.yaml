@@ -1,0 +1,11 @@
+# Paper trading environment — same shape as live but live: false on every gate.
+env: paper
+
+logging:
+  level: INFO
+  format: json
+
+broker:
+  name: alpaca
+  live: false
+  base_url: https://paper-api.alpaca.markets

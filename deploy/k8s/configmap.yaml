@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: algotrader-config
+  namespace: algotrader
+data:
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+  REDIS_STREAM_MAX_LEN: "100000"
+  ALPACA_PAPER_BASE: "https://paper-api.alpaca.markets"
+  # Per-strategy lifecycle. Strategies NOT listed default to DISABLED.
+  STRATEGIES_ENABLED: "sma_crossover,rsi_mean_reversion"
+  # Per-strategy real-money allowlist. A strategy must appear here AND have
+  # live: true in its config AND LIVE=true must be set in the secret.
+  STRATEGIES_LIVE_ALLOWED: ""

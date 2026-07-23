@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: operator-api
+  namespace: algotrader
+spec:
+  selector:
+    app: live-engine          # API runs in the same pod as the live engine
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: operator-api
+  namespace: algotrader
+  annotations:
+    # Customize per your ingress controller (nginx / traefik / ALB).
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: ["operator-api.example.com"]
+      secretName: operator-api-tls
+  rules:
+    - host: operator-api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: operator-api
+                port:
+                  number: 80

@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ingester
+  namespace: algotrader
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ingester
+  template:
+    metadata:
+      labels:
+        app: ingester
+    spec:
+      containers:
+        - name: ingester
+          image: algotrader:latest
+          command: ["python", "-m", "core.cli", "ingest"]
+          args: ["--source", "alpaca", "--symbol", "SPY", "--symbol", "QQQ", "--timeframe", "1m"]
+          envFrom:
+            - secretRef:
+                name: algotrader-secrets
+            - configMapRef:
+                name: algotrader-config
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: 2000m
+              memory: 4Gi

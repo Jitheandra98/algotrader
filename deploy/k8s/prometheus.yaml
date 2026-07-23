@@ -1,0 +1,16 @@
+# Assumes the Prometheus Operator is installed cluster-wide.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: algotrader
+  namespace: algotrader
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: operator-api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

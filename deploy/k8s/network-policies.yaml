@@ -1,0 +1,70 @@
+# Default-deny + explicit allow rules.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: algotrader
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ingester-egress
+  namespace: algotrader
+spec:
+  podSelector:
+    matchLabels:
+      app: ingester
+  policyTypes: [Egress]
+  egress:
+    - to:                                # Redis + Postgres in-cluster
+        - podSelector:
+            matchLabels:
+              app: redis
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - {protocol: TCP, port: 6379}
+        - {protocol: TCP, port: 5432}
+    - to:                                # Alpaca data API (outbound)
+        - namespaceSelector: {}
+      ports: [{protocol: TCP, port: 443}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: live-engine-egress
+  namespace: algotrader
+spec:
+  podSelector:
+    matchLabels:
+      app: live-engine
+  policyTypes: [Egress, Ingress]
+  ingress:
+    - from:                              # Ingress controller hitting /api/*
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports: [{protocol: TCP, port: 8000}]
+    - from:                              # Prometheus scrape
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports: [{protocol: TCP, port: 8000}]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - {protocol: TCP, port: 6379}
+        - {protocol: TCP, port: 5432}
+    - to:                                # Alpaca trading + WS, plus alerting webhooks
+        - namespaceSelector: {}
+      ports: [{protocol: TCP, port: 443}]

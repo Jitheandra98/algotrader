@@ -1,0 +1,50 @@
+# LIVE ENGINE — DO NOT scale replicas > 1 without distributed kill-switch state.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: live-engine
+  namespace: algotrader
+  annotations:
+    safety.algotrader.io/replicas-locked: "1"
+spec:
+  replicas: 1                  # ← Single replica. See README + ADR-0010.
+  strategy:
+    type: Recreate             # ensure only one runs at a time during deploys
+  selector:
+    matchLabels:
+      app: live-engine
+  template:
+    metadata:
+      labels:
+        app: live-engine
+    spec:
+      containers:
+        - name: live-engine
+          image: algotrader:latest
+          command: ["python", "-m", "core.cli", "live"]
+          envFrom:
+            - secretRef:
+                name: algotrader-secrets
+            - configMapRef:
+                name: algotrader-config
+          ports:
+            - containerPort: 8000     # operator-api / metrics
+              name: api
+          resources:
+            requests:
+              cpu: 1000m
+              memory: 2Gi
+            limits:
+              cpu: 4000m
+              memory: 8Gi
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: api
+            periodSeconds: 10
+            failureThreshold: 6        # ~60s grace
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: api
+            periodSeconds: 5
