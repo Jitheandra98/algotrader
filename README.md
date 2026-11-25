@@ -8,6 +8,10 @@ strategies and execution and is never bypassable.
 > *and* `live: true` on the specific strategy's config. The kill-switch is hard-coded
 > and there is no flag to disable it.
 
+> **Project status (November 2026):** an architecture and engineering project. It has never placed a live
+> order or traded real money, and the production pieces (Kubernetes, disaster recovery) were written but never
+> deployed. Test suite: 329 passed, 2 skipped (those need a local Postgres).
+
 ## Status
 
 | Milestone | Description | Status |
@@ -18,10 +22,10 @@ strategies and execution and is never bypassable.
 | M4 | Backtesting engine + KPIs + Monte Carlo + tear sheet | ✅ Done |
 | M5 | Strategy engine + 8 reference strategies + ensemble filters | ✅ Done |
 | M6 | Risk management (sizing + 13 limits + PDT/SSR + Greeks + kill-switch) | ✅ Done |
-| M7 | Execution (Alpaca live broker + smart router + slicers + fill quality) | ✅ Done |
+| M7 | Execution (Alpaca live broker + smart router + slicers + fill quality) | ✅ Code written; never run live |
 | M8 | Monitoring + alerts + operator UI (Prometheus + Grafana + FastAPI) | ✅ Done |
 | M9 | ML overlay (sklearn signal-quality, walk-forward CV) + trade journal + research workspace | ✅ Done |
-| M10 | Production hardening (K8s + DR + runbooks + chaos tests + security review) | ✅ Done |
+| M10 | Production hardening (K8s + DR + runbooks + chaos tests + security review) | ✅ Written; never deployed |
 
 ## Quick start
 
@@ -109,3 +113,9 @@ deploy/       Dockerfiles, docker-compose, K8s manifests, DR scripts
 - Secrets are loaded from environment / vault at runtime and redacted in logs.
 - No real-money trade is placed without both `LIVE=true` (env) and the strategy's
   per-strategy `live: true` flag (config).
+
+## About
+
+Built by Jitheandra Subramaniam with AI coding agents (Claude Code), directed and reviewed by me. Part of my portfolio: [github.com/Jitheandra98](https://github.com/Jitheandra98).
+
+© 2026 Jitheandra Subramaniam. All rights reserved. This code is shared for viewing; no license to copy, modify or redistribute it is granted.
